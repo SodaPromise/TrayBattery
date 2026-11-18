@@ -21,7 +21,7 @@ os.environ["APPDATA"] = TMP
 from app import startup  # noqa: E402
 from app import win32 as k  # noqa: E402
 from app.main import App  # noqa: E402
-from app.model import KEYBOARD, MOUSE, Device  # noqa: E402
+from app.model import KEYBOARD, MOUSE, SPEAKER, Device  # noqa: E402
 
 startup.sync = lambda config: None  # 冒烟测试不碰注册表
 
@@ -69,7 +69,9 @@ def main() -> int:
     }
     try:
         # ---------------------------------------------------------- 启动与托盘
-        wait_for(lambda: len(app.state.devices) == 3, "演示设备未加载")
+        wait_for(lambda: len(app.state.devices) == 4, "演示设备未加载")
+        check(any(d.kind == SPEAKER and d.name == "HUAWEI Sound Joy"
+                  for d in app.state.devices), "演示数据包含独立的音箱分类")
         check(len(app.display_devices()) == 1, "首次启动默认只显示鼠标")
         check(app.display_devices()[0].name == "MX Master 3S", "默认选中的是鼠标")
         check(app.tray._added and bool(app.tray.icon), "托盘图标已添加")

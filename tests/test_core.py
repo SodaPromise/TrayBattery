@@ -12,7 +12,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from app.model import (  # noqa: E402
-    AppState, Device, GAMEPAD, HEADSET, KEYBOARD, MOUSE, OFFLINE, ONLINE, UNSUPPORTED,
+    AppState, Device, GAMEPAD, HEADSET, KEYBOARD, MOUSE, OFFLINE, ONLINE, SPEAKER,
+    UNSUPPORTED,
 )
 from app.config import Config  # noqa: E402
 
@@ -39,6 +40,14 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(Device("k", "x", HEADSET).kind_label, "耳机")
         self.assertEqual(Device("k", "x", KEYBOARD).kind_label, "键盘")
         self.assertEqual(Device("k", "x", GAMEPAD).kind_label, "手柄")
+        self.assertEqual(Device("k", "x", SPEAKER).kind_label, "音箱")
+
+    def test_sort_key_with_speaker(self):
+        devs = [Device("gp", "GP", GAMEPAD), Device("sp", "SP", SPEAKER),
+                Device("hs", "HS", HEADSET), Device("kb", "KB", KEYBOARD),
+                Device("ms", "MS", MOUSE)]
+        self.assertEqual([d.key for d in sorted(devs, key=lambda d: d.sort_key())],
+                         ["ms", "kb", "hs", "sp", "gp"])
 
     def test_sort_key_prefers_online_then_mouse(self):
         online_mouse = Device("a", "B", MOUSE, status=ONLINE)
@@ -136,7 +145,13 @@ class ProviderTests(unittest.TestCase):
                      "HID-compliant game controller", "8BitDo Pro 2", "游戏手柄"):
             self.assertEqual(self.p.infer_kind(name), GAMEPAD, name)
         self.assertEqual(self.p.infer_kind("Audio Controller"), "other")
-        self.assertEqual(self.p.infer_kind("Sound Joy"), "other")
+        # 音箱是独立分类：便携音箱不能再落进 other，也不能被品牌词抢成耳机
+        for name in ("HUAWEI Sound Joy-01718", "Sound Joy", "Bose SoundLink Mini",
+                     "JBL Flip 6", "Sony SRS-XB33", "UE BOOM 3", "HomePod mini",
+                     "Marshall Emberton", "蓝牙音箱", "Portable Speaker"):
+            self.assertEqual(self.p.infer_kind(name), SPEAKER, name)
+        self.assertEqual(self.p.infer_kind("HUAWEI FreeBuds 6i Speakers"), HEADSET)
+        self.assertEqual(self.p.infer_kind("Soundcore Liberty 4"), HEADSET)
 
     def test_bt_mac(self):
         iid = r"BTHENUM\DEV_001122AABBCC\7&1F2E3D4C&0&BLUETOOTHDEVICE_001122AABBCC"
@@ -426,15 +441,20 @@ class DrawTests(unittest.TestCase):
 
     def test_device_glyphs(self):
         from app.draw import _gamepad_outline, device_glyph
-        for kind in ("mouse", "keyboard", "headset", "gamepad", "other"):
+        for kind in ("mouse", "keyboard", "headset", "speaker", "gamepad", "other"):
             for px in (16, 18, 32):
                 img = device_glyph(kind, px, (240, 240, 240, 255), weight=0.115)
                 self.assertEqual(img.size, (px, px), (kind, px))
                 self.assertIsNotNone(img.getbbox(), (kind, px))
         # 手柄轮廓是插值出来的，控制点一改就可能 overshoot 出画布被裁平
         s = 64
-        self.assertTrue(all(0 <= x <= s and 0 <= y <= s
-                            for x, y in _gamepad_outline(s)))
+        pts = _gamepad_outline(s)
+        self.assertTrue(all(0 <= x <= s and 0 <= y <= s for x, y in pts))
+        # 明确要求：两侧从上到下张开，不能回到旧版「肩宽、握把往内收」的造型
+        top = [x for x, y in pts if 0.25 * s <= y <= 0.40 * s]
+        bottom = [x for x, y in pts if 0.72 * s <= y <= 0.88 * s]
+        self.assertTrue(top and bottom)
+        self.assertGreater(max(bottom), max(top))
 
 
 if __name__ == "__main__":

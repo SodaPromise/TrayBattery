@@ -14,7 +14,8 @@ from ctypes import wintypes as w
 
 from . import devapi
 from .model import (
-    Device, GAMEPAD, HEADSET, KEYBOARD, MOUSE, OTHER, OFFLINE, ONLINE, UNSUPPORTED,
+    Device, GAMEPAD, HEADSET, KEYBOARD, MOUSE, OTHER, OFFLINE, ONLINE, SPEAKER,
+    UNSUPPORTED,
 )
 
 LOGITECH = 0x046D
@@ -38,6 +39,20 @@ _BT_SERVICE_SUFFIX = (
 )
 _WIRELESS_HINT = re.compile(r"receiv|dongle|2\.4\s*g|wireless|无线|接收器", re.I)
 
+# 音箱型号 / 品类词。这些要放在耳机规则之前：不少品牌同时做耳机和音箱
+# （soundcore、Bose、JBL），只按品牌词判会把便携音箱认成耳机。
+_SPEAKER_MODELS = (
+    "sound joy", "sound x", "huawei sound", "soundlink", "soundbar", "sound bar",
+    "jbl flip", "jbl charge", "jbl pulse", "jbl boombox", "jbl go", "jbl partybox",
+    "ue boom", "ue megaboom", "ultimate ears", "sony srs-", "srs-x", "srs-xb",
+    "homepod", "sonos", "echo dot", "echo show", "echo studio",
+    "marshall emberton", "marshall acton", "marshall stanmore", "marshall woburn",
+    "beosound", "beolit", "devialet", "bose portable",
+    "bluetooth speaker", "portable speaker", "smart speaker", "wifi speaker",
+)
+# 泛化词放耳机之后，避免 "FreeBuds ... Speakers" 这类音频端点被误判成音箱。
+_SPEAKER_WORDS = ("音箱", "音响", "扬声器", "speaker", "speakers")
+
 
 def _looks_wireless(name: str, ifaces: list[devapi.HidInterface]) -> bool:
     """名称里带接收器/无线字样时，才把厂商私有通道的设备标成 2.4G。"""
@@ -56,6 +71,8 @@ def clean_bt_name(name: str) -> str:
 
 def infer_kind(name: str, classes: set[str] | None = None) -> str:
     low = (name or "").lower()
+    if any(k in low for k in _SPEAKER_MODELS):
+        return SPEAKER
     if any(k in low for k in ("mouse", "鼠标", "trackball", "轨迹球",
                               "mx master", "mx anywhere")):
         return MOUSE
@@ -64,8 +81,8 @@ def infer_kind(name: str, classes: set[str] | None = None) -> str:
     if any(k in low for k in ("buds", "airpods", "headset", "headphone", "耳机", "耳麦",
                               "wh-", "wf-", "freeclip", "soundcore", "momentum", "bose qc")):
         return HEADSET
-    if any(k in low for k in ("音箱", "speaker", "sound joy", "soundlink")):
-        return OTHER
+    if any(k in low for k in _SPEAKER_WORDS):
+        return SPEAKER
     # 手柄：Windows 上常见的名字是 "Xbox Wireless Controller" /
     # "Wireless Controller"(PS4) / "Pro Controller"(Switch) / "DualSense ..."。
     # 不单独用 "controller" 兜底，免得把音频、MIDI 这类控制器也认成手柄。
@@ -80,6 +97,8 @@ def infer_kind(name: str, classes: set[str] | None = None) -> str:
         return MOUSE
     if "Keyboard" in cls:
         return KEYBOARD
+    # AudioEndpoint / MEDIA 对耳机和蓝牙音箱是同一个类名，没有名字线索时
+    # 保守归耳机，不凭 class 猜音箱。
     if cls & {"MEDIA", "AudioEndpoint", "Audio"}:
         return HEADSET
     return OTHER
@@ -835,6 +854,7 @@ _DEMO = [
     ("demo:mouse", "MX Master 3S", MOUSE, "2.4G", 87, False),
     ("demo:keyboard", "MX Keys Mini", KEYBOARD, "蓝牙", 64, False),
     ("demo:headset", "HUAWEI FreeBuds 6i", HEADSET, "蓝牙", 41, False),
+    ("demo:speaker", "HUAWEI Sound Joy", SPEAKER, "蓝牙", 72, False),
 ]
 
 

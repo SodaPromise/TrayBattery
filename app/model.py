@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 MOUSE = "mouse"
 KEYBOARD = "keyboard"
 HEADSET = "headset"
+SPEAKER = "speaker"
 GAMEPAD = "gamepad"
 OTHER = "other"
 
@@ -15,7 +16,7 @@ UNSUPPORTED = "unsupported"
 ERROR = "error"
 
 KIND_LABEL = {MOUSE: "鼠标", KEYBOARD: "键盘", HEADSET: "耳机",
-              GAMEPAD: "手柄", OTHER: "设备"}
+              SPEAKER: "音箱", GAMEPAD: "手柄", OTHER: "设备"}
 STATUS_LABEL = {ONLINE: "已连接", OFFLINE: "离线", UNSUPPORTED: "不支持", ERROR: "读取失败"}
 
 
@@ -46,7 +47,7 @@ class Device:
         return self.detail or "读取失败，稍后重试"
 
     def sort_key(self) -> tuple:
-        order = {MOUSE: 0, KEYBOARD: 1, HEADSET: 2, GAMEPAD: 3, OTHER: 4}
+        order = {MOUSE: 0, KEYBOARD: 1, HEADSET: 2, SPEAKER: 3, GAMEPAD: 4, OTHER: 5}
         return (0 if self.status == ONLINE else 1, order.get(self.kind, 9), self.name.lower())
 
 
