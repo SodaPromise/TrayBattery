@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import time
 import winreg
 from dataclasses import dataclass
 
@@ -89,18 +90,27 @@ DARK = Theme(
 
 
 def system_uses_light_theme() -> bool:
+    return _personalize_flag("AppsUseLightTheme", True)
+
+
+def system_taskbar_light() -> bool:
+    """任务栏自己的深浅色，跟"应用模式"是分开的开关。"""
+    return _personalize_flag("SystemUsesLightTheme", False)
+
+
+def _personalize_flag(name: str, default: bool) -> bool:
     try:
         key = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize",
         )
         try:
-            value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+            value, _ = winreg.QueryValueEx(key, name)
             return bool(value)
         finally:
             winreg.CloseKey(key)
     except OSError:
-        return True
+        return default
 
 
 def resolve_theme(mode: str) -> Theme:
@@ -110,6 +120,88 @@ def resolve_theme(mode: str) -> Theme:
     if mode == "dark":
         return DARK
     return LIGHT if system_uses_light_theme() else DARK
+
+
+# ------------------------------------------------------------------ 任务栏墨色
+@dataclass(frozen=True)
+class BarSkin:
+    """任务栏上"原生状态项"的墨色：只有黑白 + 系统告警色，没有底色。"""
+
+    dark: bool
+    fg: tuple
+    dim: tuple
+    hover: tuple
+    pressed: tuple
+    critical: tuple
+
+    def level_color(self, level: int | None, status: str, charging: bool = False):
+        if status != "online" or level is None:
+            return self.dim
+        if not charging and level <= 10:      # 和 Windows 一样，低于 10% 才转红
+            return self.critical
+        return self.fg
+
+
+DARK_BAR = BarSkin(
+    dark=True,
+    fg=(255, 255, 255, 255),
+    dim=(255, 255, 255, 150),
+    hover=(255, 255, 255, 18),
+    pressed=(255, 255, 255, 30),
+    critical=(255, 153, 164, 255),        # SystemFillColorCriticalLight
+)
+
+LIGHT_BAR = BarSkin(
+    dark=False,
+    fg=(26, 26, 26, 255),
+    dim=(26, 26, 26, 138),
+    hover=(0, 0, 0, 14),
+    pressed=(0, 0, 0, 26),
+    critical=(196, 43, 28, 255),          # SystemFillColorCriticalDark
+)
+
+
+def _sample_brightness(box) -> int | None:
+    """取一块屏幕区域的平均亮度；任务栏可能是深色、浅色或强调色。"""
+    try:
+        from PIL import Image, ImageGrab
+
+        im = ImageGrab.grab(bbox=tuple(int(round(v)) for v in box), all_screens=True)
+        if im.width < 2 or im.height < 2:
+            return None
+        return int(im.convert("L").resize((1, 1), Image.BOX).getpixel((0, 0)))
+    except Exception:
+        return None
+
+
+_skin_cache: tuple[float, BarSkin] | None = None
+
+
+def bar_skin(box=None, force: bool = False) -> BarSkin:
+    """黑底任务栏上写字用白，浅色或强调色浅底上写字用近黑。
+
+    直接采样任务栏像素，比读注册表更准：任务栏可以是强调色、毛玻璃，
+    甚至和"应用模式"不同色，只有实际亮度才能决定墨色。
+    """
+    global _skin_cache
+    now = time.monotonic()
+    if not force and _skin_cache is not None and now - _skin_cache[0] < 2.0:
+        return _skin_cache[1]
+    brightness = _sample_brightness(box) if box else None
+    dark = (not system_taskbar_light()) if brightness is None else brightness < 150
+    skin = DARK_BAR if dark else LIGHT_BAR
+    _skin_cache = (now, skin)
+    return skin
+
+
+def forget_bar_skin() -> None:
+    global _skin_cache
+    _skin_cache = None
+
+
+def card_skin(theme: Theme) -> BarSkin:
+    """悬浮卡片上的墨色：跟卡片自己的深浅走，而不是任务栏。"""
+    return DARK_BAR if theme.dark else LIGHT_BAR
 
 
 FONT_FILES = {
@@ -133,8 +225,12 @@ class Fonts:
         key = f"{weight}{digit}"
         if key not in self._paths:
             fname, idx = FONT_FILES.get((weight, digit), FONT_FILES[("regular", False)])
-            self._paths[key] = (os.path.join(FONT_DIR, fname), idx)
+            path = os.path.join(FONT_DIR, fname)
+            if not os.path.exists(path):
+                path, idx = os.path.join(FONT_DIR, "segoeui.ttf"), 0
+            self._paths[key] = (path, idx)
         return self._paths[key]
+
 
     def get(self, size: float, weight: str = "regular", digit: bool = False):
         px = max(8, int(round(size * self.scale)))

@@ -12,9 +12,9 @@ from .model import (
     AppState, Device, MOUSE, OFFLINE, ONLINE, STATUS_LABEL,
 )
 from .monitor import Monitor
-from .theme import Fonts, resolve_theme
+from .theme import Fonts, forget_bar_skin, resolve_theme
 from .tray import (
-    MENU_AUTOSTART, MENU_BAR, MENU_DEVICE_BASE, MENU_OPEN, MENU_PAUSE,
+    MENU_AUTOSTART, MENU_BAR, MENU_BAR_HOME, MENU_DEVICE_BASE, MENU_OPEN, MENU_PAUSE,
     MENU_QUIT, MENU_REFRESH, MENU_SETTINGS, TrayHost,
     WM_REFRESHING, WM_SHOW_PANEL, WM_SHOW_SETTINGS,
 )
@@ -297,6 +297,7 @@ class App:
         self.config["show_bar"] = not bool(self.config["show_bar"])
         if not self.config["show_bar"]:
             self.config["bar_pos"] = None
+            self.config["bar_offset"] = 0
         self.config.save()
         self.update_bar()
 
@@ -325,6 +326,7 @@ class App:
         self.config["interval"] = 60
         self.config["tray_mode"] = "cycle"
         self.config["show_bar"] = True
+        self.config["bar_offset"] = 0
         self.config["alert"] = True
         self.config["theme"] = "auto"
         self.config.save()
@@ -359,6 +361,8 @@ class App:
                       MENU_PAUSE, "暂停自动刷新")
         k.AppendMenuW(menu, k.MF_STRING | (k.MF_CHECKED if self.config["show_bar"] else 0),
                       MENU_BAR, "显示任务栏电量条")
+        if self.config["show_bar"] and int(self.config["bar_offset"] or 0) > 0:
+            k.AppendMenuW(menu, k.MF_STRING, MENU_BAR_HOME, "电量条回到原位")
         k.AppendMenuW(menu, k.MF_STRING, MENU_SETTINGS, "设置…")
         k.AppendMenuW(menu, k.MF_STRING | (k.MF_CHECKED if startup.is_enabled() else 0),
                       MENU_AUTOSTART, "开机自动启动")
@@ -389,6 +393,9 @@ class App:
             self.toggle_show_bar()
             if self.settings_window and self.settings_window.visible:
                 self.settings_window.refresh()
+        elif cmd == MENU_BAR_HOME:
+            if self.bar_window is not None:
+                self.bar_window.reset_offset()
         elif cmd == MENU_AUTOSTART:
             self.toggle_autostart()
         elif cmd == MENU_QUIT:
@@ -460,8 +467,14 @@ class App:
             text = ctypes.wstring_at(lp) if lp else ""
         except Exception:
             text = ""
-        if text == "ImmersiveColorSet" and self.config["theme"] == "auto":
+        if text != "ImmersiveColorSet":
+            return
+        # 任务栏可能是深色 / 浅色 / 强调色，改完要重新采样墨色
+        forget_bar_skin()
+        if self.config["theme"] == "auto":
             self.apply_theme()
+        elif self.bar_window and self.bar_window.visible:
+            self.bar_window.invalidate()
 
     def on_display_change(self) -> None:
         """分辨率/显示器变化后把常驻窗口拉回可见区域。"""

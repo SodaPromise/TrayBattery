@@ -55,7 +55,7 @@ class SettingsWindow(LayerWindow):
         return [
             ("seg", "自动刷新间隔", INTERVALS_OPTIONS, interval_idx, 208, "interval"),
             ("seg", "托盘图标", [o for _, o in TRAY_MODES], tray_idx, 132, "traymode"),
-            ("toggle", "任务栏电量条", "嵌在任务栏托盘区 / 输入法旁显示已选设备",
+            ("toggle", "任务栏电量条", "在托盘区左侧显示，跟随任务栏深浅，可左右拖动",
              bool(cfg["show_bar"]), "bar"),
             ("toggle", "低电量提醒", f"电量低于 {cfg['alert_threshold']}% 时提醒",
              bool(cfg["alert"]), "alert"),

@@ -150,12 +150,12 @@ def level_color(theme: Theme, level: int | None, charging: bool = False, status:
 
 
 # ------------------------------------------------------------------ 设备图标
-def device_glyph(kind: str, px: int, color) -> Image.Image:
-    """按 4 倍绘制再缩小，得到平滑的小图标。"""
+def device_glyph(kind: str, px: int, color, weight: float = 0.085) -> Image.Image:
+    """按 4 倍绘制再缩小，得到平滑的小图标。weight 是线宽占图标边长的比例。"""
     s = px * 4
     im = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
-    lw = max(2, int(s * 0.085))
+    lw = max(2, int(round(s * weight)))
 
     if kind == "mouse":
         # 机身
@@ -198,6 +198,27 @@ def device_glyph(kind: str, px: int, color) -> Image.Image:
         d.ellipse((s * 0.44, s * 0.44, s * 0.56, s * 0.56), fill=color)
 
     return im.resize((px, px), Image.LANCZOS)
+
+
+def charge_bolt(size: int, color, plate=None) -> Image.Image:
+    """充电角标：一枚小闪电，贴在设备图标右下角（和系统电池图标一个意思）。"""
+    s = size * 4
+    im = Image.new("RGBA", (s, s), (0, 0, 0, 0))
+    if plate is not None:
+        ImageDraw.Draw(im).ellipse((0, 0, s - 1, s - 1), fill=plate)
+    d = ImageDraw.Draw(im)
+    pad = s * 0.20
+    w_ = s - pad * 2
+    pts = [
+        (s * 0.58, pad),
+        (s * 0.30, s * 0.55),
+        (s * 0.47, s * 0.55),
+        (s * 0.40, pad + w_),
+        (s * 0.68, s * 0.44),
+        (s * 0.50, s * 0.44),
+    ]
+    d.polygon(pts, fill=color)
+    return im.resize((size, size), Image.LANCZOS)
 
 
 def app_mark(size: int, theme: Theme) -> Image.Image:

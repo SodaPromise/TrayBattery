@@ -23,6 +23,7 @@ MENU_PAUSE = 4
 MENU_BAR = 5
 MENU_AUTOSTART = 6
 MENU_QUIT = 7
+MENU_BAR_HOME = 8
 MENU_DEVICE_BASE = 100
 
 # 资源管理器重启后会广播这条消息，收到后要重新添加图标

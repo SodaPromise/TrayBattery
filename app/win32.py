@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import ctypes
+
+from PIL import Image
 from ctypes import wintypes as w
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
@@ -102,6 +104,7 @@ SM_CYSCREEN = 1
 IDC_ARROW = 32512
 IDC_HAND = 32649
 IDC_SIZENS = 32645
+IDC_SIZEWE = 32644
 
 SPI_GETWORKAREA = 0x0030
 SPI_SETWORKAREA = 0x002F
@@ -555,10 +558,17 @@ class LayeredCanvas:
             self.size = (0, 0)
 
     def upload(self, image) -> None:
-        """image: PIL RGBA，尺寸需与 ensure 的一致。"""
+        """image: PIL RGBA，尺寸需与 ensure 的一致。
+
+        UpdateLayeredWindow 要的是"预乘 alpha"像素（颜色已经乘过 alpha）。
+        直接塞 RGBA 的话，半透明像素会被当成纯色叠加——文字描边发白、
+        半透明底变成实心色块。这里统一转一次 RGBa。
+        """
         w_, h_ = image.size
         self.ensure(w_, h_)
-        raw = image.convert("RGBA").tobytes("raw", "BGRA")
+        src = image if image.mode == "RGBa" else image.convert("RGBa")
+        r, g, b, a = src.split()
+        raw = Image.merge("RGBA", (b, g, r, a)).tobytes("raw", "RGBA")
         ctypes.memmove(self.bits, raw, len(raw))
 
     def present(self, hwnd: HWND, x: int | None = None, y: int | None = None, alpha: int = 255) -> bool:

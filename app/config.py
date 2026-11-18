@@ -23,6 +23,7 @@ DEFAULTS = {
     "interval": 60,
     "show_bar": True,
     "bar_pos": None,
+    "bar_offset": 0,
     "tray_mode": "cycle",
     "theme": "auto",
     "autostart": False,

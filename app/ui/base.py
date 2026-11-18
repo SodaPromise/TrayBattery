@@ -179,6 +179,9 @@ class LayerWindow:
         if msg == k.WM_LBUTTONUP:
             self._on_mouse_up()
             return 0
+        if msg == k.WM_RBUTTONUP:
+            self.on_right_click()
+            return 0
         if msg == k.WM_MOUSEWHEEL:
             delta = ctypes.c_short((wp >> 16) & 0xFFFF).value
             self.on_wheel(delta)
@@ -227,7 +230,8 @@ class LayerWindow:
         ly = sy - self.pos[1]
         for (x0, y0, x1, y1), _id, cursor in reversed(self.hits):
             if x0 <= lx <= x1 and y0 <= ly <= y1:
-                return {"hand": k.IDC_HAND, "size": k.IDC_SIZENS}.get(cursor or "")
+                return {"hand": k.IDC_HAND, "size": k.IDC_SIZENS,
+                        "move": k.IDC_SIZEWE}.get(cursor or "")
         return None
 
     def hit_at(self) -> tuple[str | None, tuple | None]:
@@ -244,11 +248,11 @@ class LayerWindow:
             self._tracking_leave = True
         if self._dragging:
             x, y = k.cursor_pos()
-            nx, ny = x - self._drag_offset[0], y - self._drag_offset[1]
+            nx, ny = self.drag_target(x - self._drag_offset[0], y - self._drag_offset[1])
             if abs(nx - self.pos[0]) + abs(ny - self.pos[1]) > 2:
                 self._drag_moved = True
-            self.pos = (nx, ny)
-            k.SetWindowPos(self.hwnd, None, nx, ny, self.w, self.h, k.SWP_NOZORDER | k.SWP_NOACTIVATE)
+            # 走 place() 而不是直接 SetWindowPos：子窗口要把屏幕坐标换成父窗口客户区
+            self.place(nx, ny)
             return
         hid, _rect = self.hit_at()
         if hid != self.hover:
@@ -272,11 +276,11 @@ class LayerWindow:
         if self._dragging:
             self._dragging = False
             k.ReleaseCapture()
+            hid = self.pressed
+            self.pressed = None          # 拖完不要留着按下态
             if self._drag_moved:
                 self.on_drag_end()
                 return
-            hid = self.pressed
-            self.pressed = None
             if hid and hid == self.hit_at()[0]:
                 self.on_click(hid)
             return
@@ -323,6 +327,13 @@ class LayerWindow:
 
     def is_drag_handle(self, hid: str) -> bool:
         return False
+
+    def drag_target(self, nx: int, ny: int) -> tuple[int, int]:
+        """拖拽时窗口应去的位置；子类可以夹到某个范围内。"""
+        return nx, ny
+
+    def on_right_click(self) -> None:
+        pass
 
     def on_drag_end(self) -> None:
         pass

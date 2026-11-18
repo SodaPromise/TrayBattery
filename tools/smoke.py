@@ -121,6 +121,59 @@ def main() -> int:
         check(fly.pos[1] + fly.h <= bar.pos[1] + 2, "面板在任务栏上方，未压住电量条")
         fly.hide()
 
+        # ---------------------------------------------------------- 原生外观
+        bar.hover = None            # 鼠标可能正好停在电量条上，先归零再量尺寸
+        bar.pressed = None
+        image = bar.render()
+        check(image.getpixel((0, 0))[3] <= 2, "电量条没有可见底色（左上角几乎全透明）")
+        check(image.getpixel((image.width - 1, 0))[3] <= 2, "电量条没有可见底色（右上角几乎全透明）")
+        solid = sum(image.getchannel("A").histogram()[9:])
+        check(solid < image.width * image.height * 0.55, "电量条大部分是透明的，不是一整块膏药")
+        check(abs(bar.h - (taskbar.bottom - taskbar.top)) <= 1, "电量条与任务栏等高")
+        check(all(h[2] is None for h in bar.hits), "任务栏上用原生箭头光标")
+        if bar.skin.dark:
+            check(bar.skin.fg[0] > 200, "深色任务栏上用白墨")
+        else:
+            check(bar.skin.fg[0] < 60, "浅色任务栏上用深墨")
+
+        bar.hover = "bar"
+        hover_img = bar.render()
+        mid = hover_img.width // 2
+        check(hover_img.getpixel((mid, 2))[3] < 8, "悬停高亮没有顶到任务栏边缘")
+        check(hover_img.getpixel((mid, hover_img.height // 2))[3] > 0, "悬停时出现高亮底板")
+        bar.hover = None
+
+        # 设备增减后仍要贴住托盘，不能向右压住托盘图标
+        more = app.display_devices()
+        app.state.devices.append(Device("demo:bar3", "Third Mouse", MOUSE, "2.4G", level=42))
+        app.config.set_enabled("demo:bar3", True)
+        app.update_bar()
+        pump(120)
+        check(bar.pos[0] + bar.w <= tn.left + 2, "变宽后仍然停在托盘区左侧")
+        app.config.set_enabled("demo:bar3", False)
+        app.state.devices = [d for d in app.state.devices if d.key != "demo:bar3"]
+        app.update_bar()
+        pump(120)
+        check(len(app.display_devices()) == len(more), "移除临时设备后恢复")
+
+        # ---------------------------------------------------------- 拖动换位
+        band = bar._band()
+        check(band is not None and band[1] - band[0] > 100 * app.scale, "电量条有可拖动的任务栏空白段")
+        check(bar.drag_target(band[0] - 5000, bar.pos[1])[0] == band[0], "拖动范围左边界会被夹住")
+        check(bar.drag_target(band[1] + 5000, bar.pos[1])[0] == band[1], "拖动范围右边界会被夹住")
+        check(bar.drag_target(bar.pos[0], bar.pos[1] - 200)[1] == bar.pos[1], "拖动时不会离开任务栏")
+        home = bar.pos[0]
+        bar.place(band[1] - int(round(60 * app.scale)), bar.pos[1])
+        bar.on_drag_end()
+        pump(80)
+        check(int(app.config["bar_offset"]) >= 56, "拖动后记住新的横向位置")
+        check(abs(bar.pos[0] - (home - int(round(int(app.config["bar_offset"]) * app.scale)))) <= 2,
+              "重新贴边时按记录的位置摆放")
+        check(bar.pos[0] + bar.w <= tn.left + 2, "拖动后仍在托盘区左侧")
+        bar.reset_offset()
+        pump(80)
+        check(app.config["bar_offset"] == 0 and bar.pos[0] == home, "可以回到默认位置")
+
         # ---------------------------------------------------------- 设置窗口
         app.open_settings()
         pump(260)
