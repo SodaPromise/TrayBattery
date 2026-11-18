@@ -227,6 +227,17 @@ _SEGOE_FALLBACK = {
 }
 
 
+# 西文与数字单独走 Segoe UI Variable：微软雅黑自带的拉丁字形偏宽偏矮，
+# 和 Windows 原生界面（正文一直是 Segoe UI）放在一起会显得"不是这个系统的字"。
+# 按字重给对应实例，中文那边缺 semibold 是合成描边，西文这里有真字重。
+_LATIN_FACE = {
+    "regular": ("SegUIVar.ttf", 0, "Regular"),
+    "semibold": ("SegUIVar.ttf", 0, "Semibold Text"),
+    "bold": ("SegUIVar.ttf", 0, "Bold Text"),
+    "light": ("SegUIVar.ttf", 0, "Light Text"),
+}
+
+
 class Fonts:
     def __init__(self, scale: float) -> None:
         self.scale = scale
@@ -268,7 +279,15 @@ class Fonts:
                     pass
         except Exception:
             font = ImageFont.load_default()
-        # 渲染层靠这份元数据在 3 倍尺寸上重建同款字体
-        font._tb = (path, px, idx, var, boost)
+        # 渲染层靠这份元数据在 3 倍尺寸上重建同款字体；
+        # latin 是同一字号下的西文搭档，中英混排时按字符分流（见 draw.render_text）
+        latin = None
+        if not digit:
+            lname, lidx, lvar = _LATIN_FACE.get(weight, _LATIN_FACE["regular"])
+            lpath = os.path.join(FONT_DIR, lname)
+            if not os.path.exists(lpath):
+                lpath, lidx, lvar = os.path.join(FONT_DIR, "segoeui.ttf"), 0, None
+            latin = (lpath, lidx, lvar)
+        font._tb = (path, px, idx, var, boost, latin)
         self._cache[key] = font
         return font

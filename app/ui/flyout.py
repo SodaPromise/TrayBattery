@@ -142,7 +142,7 @@ class FlyoutWindow(LayerWindow):
                 (pad + 26, cy - 9))
 
         max_text_w = panel_w - 62 - 116
-        name = ellipsize(self._measure, dev.name, f.get(13, "semibold"), max_text_w * self.scale)
+        name = ellipsize(dev.name, f.get(13, "semibold"), max_text_w * self.scale)
         c.text((pad + 62, cy - 9), name, f.get(13, "semibold"), theme.c("text"),
                "lm", tracking=0.1)
         c.text((pad + 62, cy + 10), dev.status_text(), f.get(10.5), theme.c("sub"), "lm")

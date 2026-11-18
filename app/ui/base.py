@@ -7,7 +7,7 @@ from ctypes import wintypes as w
 from PIL import Image, ImageDraw
 
 from .. import win32 as k
-from ..draw import Canvas
+from ..draw import Canvas, text_width
 from ..theme import Fonts
 
 
@@ -47,7 +47,6 @@ class LayerWindow:
         self._anim_i = 0
         self._anim_frames = 1
         self._animating = False
-        self._measure = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
 
     # ------------------------------------------------------------------ 尺寸
     @property
@@ -58,7 +57,7 @@ class LayerWindow:
         return max(1, int(round(v * self.scale)))
 
     def measure(self, text: str, font) -> float:
-        return self._measure.textlength(text, font=font) / self.scale
+        return text_width(text, font) / self.scale
 
     def set_size(self, w_: int, h_: int) -> None:
         if (w_, h_) != (self.lw, self.lh):

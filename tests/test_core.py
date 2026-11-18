@@ -268,14 +268,32 @@ class DrawTests(unittest.TestCase):
         self.assertEqual(img.getpixel((60, 20))[3], 255)
 
     def test_ellipsize(self):
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import ImageFont
         from app.draw import ellipsize
-        d = ImageDraw.Draw(Image.new("RGBA", (10, 10)))
         font = ImageFont.load_default()
-        out = ellipsize(d, "abcdefghij" * 4, font, 40)
+        out = ellipsize("abcdefghij" * 4, font, 40)
         self.assertTrue(out.endswith("…"))
         self.assertLess(len(out), 40)
-        self.assertEqual(ellipsize(d, "短", font, 200), "短")
+        self.assertEqual(ellipsize("短", font, 200), "短")
+
+    def test_mixed_script_fonts(self):
+        """中英按字符分流：西文走 Segoe，比整段用雅黑的拉丁字形窄。"""
+        from PIL import Image, ImageDraw, ImageFont
+        from app.draw import render_text, text_width
+        from app.theme import Fonts
+        fonts = Fonts(1.0)
+        font = fonts.get(13, "regular")
+        latin = "HUAWEI FreeBuds 6i"
+        mono = ImageDraw.Draw(Image.new("RGBA", (2, 2))).textlength(latin, font=font)
+        self.assertLess(text_width(latin, font), mono)
+        self.assertIsNotNone(render_text(latin + " 耳机", font,
+                                         (240, 240, 240, 255)).getbbox())
+        # 边界：空串、数字专用字体、没有重建信息的默认字体都不能炸
+        self.assertEqual(text_width("", font), 0.0)
+        self.assertEqual(text_width("", fonts.get(13, "semibold", True)), 0.0)
+        plain = ImageFont.load_default()
+        self.assertIsNotNone(render_text("Ab 中文", plain,
+                                         (255, 255, 255, 255)).getbbox())
 
     def test_battery_glyph(self):
         from app.draw import battery_glyph

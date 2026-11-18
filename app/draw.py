@@ -31,9 +31,41 @@ def _font_at(path: str, px: int, index: int, var: str | None):
 def _font_meta(font) -> tuple:
     meta = getattr(font, "_tb", None)
     if meta is None:
-        meta = (getattr(font, "path", ""), getattr(font, "size", 12),
-                getattr(font, "index", 0), None, 0.0)
+        # load_default() 的 path 是 BytesIO 而不是文件路径，没法按字号重建；
+        # 统一当成"无重建信息"，交给 render_text 的 1× 降级分支。
+        path = getattr(font, "path", "")
+        if not isinstance(path, str):
+            path = ""
+        meta = (path, getattr(font, "size", 12),
+                getattr(font, "index", 0), None, 0.0, None)
     return meta
+
+
+def _is_cjk(ch: str) -> bool:
+    """汉字、假名、韩文、全角标点都归到中文字体，其余（拉丁、数字、半角符号）走西文字体。"""
+    o = ord(ch)
+    return (0x2E80 <= o <= 0x9FFF or 0xF900 <= o <= 0xFAFF
+            or 0xFE30 <= o <= 0xFE4F or 0xFF00 <= o <= 0xFFEF
+            or 0x1100 <= o <= 0x11FF or 0x3130 <= o <= 0x318F
+            or 0xAC00 <= o <= 0xD7AF)
+
+
+def _split_runs(s: str) -> list[tuple[str, bool]]:
+    """切成"中文段 / 西文段"，同段内才能保留正常字距调整（kerning）。"""
+    if not s:
+        return []
+    runs: list[tuple[str, bool]] = []
+    buf = s[0]
+    flag = _is_cjk(s[0])
+    for ch in s[1:]:
+        f = _is_cjk(ch)
+        if f == flag:
+            buf += ch
+        else:
+            runs.append((buf, flag))
+            buf, flag = ch, f
+    runs.append((buf, flag))
+    return runs
 
 
 def _blend(img: Image.Image, src: Image.Image, x: float, y: float) -> None:
@@ -60,44 +92,70 @@ def render_text(s: str, font, fill, tracking: float = 0.0) -> Image.Image:
 
     tracking 是字距（物理像素，可为负）；中文标题加一点正字距会更透气，
     任务栏上的百分比则用一点负字距，数字才不会散。
+
+    中英混排按字符分流：汉字走微软雅黑，拉丁字母和数字走 Segoe UI Variable，
+    和系统原生界面的做法一致——整段都用雅黑的话，英文会明显偏宽偏矮。
+    两段共用同一条基线，混排时不会一高一低。
     """
-    path, px, index, var, boost = _font_meta(font)
+    path, px, index, var, boost, latin = _font_meta(font)
     fill = tuple(fill[:3]) + ((fill[3] if len(fill) > 3 else 255),)
     if not s:
         return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
-    key = (path, px, index, var, boost, s, fill, round(tracking, 2))
+    key = (path, px, index, var, boost, latin, s, fill, round(tracking, 2))
     cached = _TEXT_CACHE.get(key)
     if cached is not None:
         _TEXT_CACHE.move_to_end(key)
         return cached
 
-    hi = _font_at(path, max(1, px * TEXT_SS), index, var)
-    probe = ImageDraw.Draw(Image.new("RGBA", (2, 2)))
-    stroke = boost * TEXT_SS
-    pad = 4 * TEXT_SS
-    if tracking:
-        advances = [probe.textlength(ch, font=hi) for ch in s]
-        total = sum(advances) + tracking * TEXT_SS * max(0, len(s) - 1)
-        layer = Image.new("RGBA", (int(total) + pad * 2, int(hi.size * 1.8) + pad * 2),
-                          (0, 0, 0, 0))
-        d = ImageDraw.Draw(layer)
-        x = float(pad)
-        for ch, adv in zip(s, advances):
-            d.text((x, pad), ch, font=hi, fill=fill, anchor="lt",
-                   stroke_width=stroke, stroke_fill=fill)
-            x += adv + tracking * TEXT_SS
+    if path:
+        ss = TEXT_SS
+        hi_px = max(1, px * ss)
+        hi = _font_at(path, hi_px, index, var)
+        lat = _font_at(latin[0], hi_px, latin[1], latin[2]) if latin else hi
     else:
-        layer = Image.new("RGBA", (int(probe.textlength(s, font=hi) * 1.2) + pad * 2,
-                                  int(hi.size * 1.8) + pad * 2), (0, 0, 0, 0))
-        ImageDraw.Draw(layer).text((pad, pad), s, font=hi, fill=fill, anchor="lt",
-                                   stroke_width=stroke, stroke_fill=fill)
+        # 外部传入的字体（例如 Pillow 默认字体）没有重建信息：
+        # 退回 1× 直接绘制，功能不残废，只是少了超采样。
+        ss = 1
+        hi_px = max(1, getattr(font, "size", 12))
+        hi = lat = font
+    stroke = boost * ss
+    pad = 4 * ss
+    probe = ImageDraw.Draw(Image.new("RGBA", (2, 2)))
+
+    # 分段：每段用自己的字体；描边只加在中文上（西文有真字重，不需要伪造加粗）
+    parts = []
+    for text, cjk in _split_runs(s):
+        parts.append((text, hi if cjk else lat, stroke if cjk else 0.0))
+
+    width = sum(probe.textlength(t, font=f) for t, f, _ in parts)
+    if tracking:
+        width += tracking * ss * max(0, len(s) - 1)
+
+    ascent = max(f.getmetrics()[0] for _, f, _ in parts)
+    layer = Image.new("RGBA",
+                      (int(width * 1.12) + pad * 2, int(hi_px * 1.9) + pad * 2),
+                      (0, 0, 0, 0))
+    d = ImageDraw.Draw(layer)
+    baseline = pad + ascent
+    x = float(pad)
+    for text, f, sw in parts:
+        if tracking:
+            for ch in text:
+                d.text((x, baseline), ch, font=f, fill=fill, anchor="ls",
+                       stroke_width=sw, stroke_fill=fill)
+                x += probe.textlength(ch, font=f) + tracking * ss
+        else:
+            d.text((x, baseline), text, font=f, fill=fill, anchor="ls",
+                   stroke_width=sw, stroke_fill=fill)
+            x += probe.textlength(text, font=f)
+
     ink = layer.getbbox()
     if ink is None:
         out = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
     else:
         ink = layer.crop(ink)
-        out = ink.resize((max(1, int(round(ink.width / TEXT_SS))),
-                          max(1, int(round(ink.height / TEXT_SS)))), Image.LANCZOS)
+        out = ink.resize((max(1, int(round(ink.width / ss))),
+                          max(1, int(round(ink.height / ss)))), Image.LANCZOS)
     _TEXT_CACHE[key] = out
     if len(_TEXT_CACHE) > _TEXT_CACHE_MAX:
         _TEXT_CACHE.popitem(last=False)
@@ -204,13 +262,29 @@ class Canvas:
         return img
 
 
-def ellipsize(draw: ImageDraw.ImageDraw, text: str, font, max_w: float) -> str:
+def text_width(s: str, font) -> float:
+    """按实际渲染规则量宽度：中文用 font，西文用它的 Segoe 搭档。
+
+    直接拿中文字体量 "HUAWEI FreeBuds 6i" 会偏宽一截，省略号会提前出现。
+    """
+    latin = _font_meta(font)[5]
+    probe = ImageDraw.Draw(Image.new("RGBA", (2, 2)))
+    if not latin:
+        return probe.textlength(s, font=font)
+    lat = _font_at(latin[0], max(1, getattr(font, "size", 12)), latin[1], latin[2])
+    total = 0.0
+    for text, cjk in _split_runs(s):
+        total += probe.textlength(text, font=font if cjk else lat)
+    return total
+
+
+def ellipsize(text: str, font, max_w: float) -> str:
     if not text:
         return ""
-    if draw.textlength(text, font=font) <= max_w:
+    if text_width(text, font) <= max_w:
         return text
     ell = "…"
-    while text and draw.textlength(text + ell, font=font) > max_w:
+    while text and text_width(text + ell, font) > max_w:
         text = text[:-1]
     return text + ell
 

@@ -188,12 +188,23 @@ def main() -> int:
         settings.refresh()
         pump(120)
         check(settings._content_h > settings._body_h, "设备较多时内容可滚动")
+        # 记录缓动过程里的每一帧：固定 sleep 后再采样会碰上 timer 消息迟到，
+        # 偶发把"还没开始动"误判成"滚不动"，改成看帧序列就确定多了。
+        frames = []
+        orig_step = settings._paint_scroll
+
+        def traced_step():
+            done = orig_step()
+            frames.append(settings.scroll)
+            return done
+
+        settings._paint_scroll = traced_step
         settings.on_wheel(-240)
-        pump(40)
-        mid = settings.scroll
-        check(mid > 0, "滚轮可以滚动")
-        pump(200)
-        check(settings.scroll > mid, "滚动是逐帧缓动的，不是瞬间跳过去")
+        wait_for(lambda: not settings._scroll_timer, "滚轮可以滚动", timeout=1.5)
+        settings._paint_scroll = orig_step
+        check(bool(frames) and frames[-1] > 0, "滚轮可以滚动")
+        check(len(frames) >= 3 and frames[0] < frames[-1],
+              "滚动是逐帧缓动的，不是瞬间跳过去")
         settings.on_wheel(9999)
         wait_for(lambda: settings.scroll == 0, "滚回顶部会夹住", timeout=1.2)
 
