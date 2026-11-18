@@ -437,8 +437,7 @@ def scan_logitech(ifaces: list[devapi.HidInterface] | None = None):
         if itf.path in seen_paths:
             continue
         seen_paths.add(itf.path)
-        if itf.container_id:
-            skip_containers.add(itf.container_id)
+        cid = itf.container_id
         dev = devapi.HidDevice(itf.path)
         if not dev.valid or not dev.caps:
             dev.close()
@@ -476,8 +475,14 @@ def scan_logitech(ifaces: list[devapi.HidInterface] | None = None):
                     continue
                 found = True
                 devices.append(_logi_device(product, index, name, link, receiver))
-            if receiver and not found:
-                skip_containers.add(itf.container_id or "")
+            if found and cid:
+                # 只有真的用 HID++ 读到了设备，这个容器才由罗技分支独占。
+                # 蓝牙直连的 K380 也带 0xFF00 通道，却完全不应答 HID++；
+                # 早期版本无条件登记容器，会把整台键盘从通用 HID 分支里屏蔽掉。
+                skip_containers.add(cid)
+            elif receiver and not found and cid:
+                # 接收器本身不该在通用分支里再出一行
+                skip_containers.add(cid)
         finally:
             dev.close()
     return devices, skip_containers
@@ -702,6 +707,21 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
     ifaces = devapi.scan_hid_interfaces()
     nodes = devapi.scan_pnp_nodes()
     classes = group_container_classes(nodes)
+    # 蓝牙 HID 设备枚举出来的接口是 HID\{00001124-...}_VID&... 前缀，
+    # 不是 BTHENUM；只看接口前缀会把它当有线的，也拿不到真实 MAC
+    # （从 Bluetooth base UUID 里抠出的 00805F9B34FB 是个假 MAC）。
+    # 容器里存在 BTH 节点才是可靠依据，MAC 也只从这些节点取。
+    bt_container_ids: set[str] = set()
+    bt_container_macs: dict[str, str] = {}
+    for node in nodes:
+        cid = node.container_id
+        if not cid or not node.enumerator.upper().startswith("BTH"):
+            continue
+        bt_container_ids.add(cid)
+        if "DEV_" in node.instance_id.upper():
+            mac = _bt_mac(node.instance_id)
+            if mac:
+                bt_container_macs.setdefault(cid, mac)
     connected_map = bluetooth_connection_map()
     active_keys = active_bluetooth_keys(ifaces)
     devices: dict[str, Device] = {}
@@ -767,9 +787,17 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
         kind = infer_kind(name, cls)
         if kind == OTHER:
             continue
-        is_bt = any(i.instance_id.upper().startswith("BTH") for i in group)
+        is_bt = cid in bt_container_ids or any(
+            i.instance_id.upper().startswith("BTH") for i in group)
+        bt_mac = None
         if is_bt:
-            bt_mac = _bt_mac(group[0].instance_id)
+            bt_mac = bt_container_macs.get(cid)
+            if not bt_mac:
+                for itf in group:
+                    if itf.instance_id.upper().startswith(("BTHENUM", "BTHLE")):
+                        bt_mac = _bt_mac(itf.instance_id)
+                        if bt_mac:
+                            break
             if not bluetooth_is_connected(bt_mac, cid, name, connected_map, active_keys):
                 offline_bt_keys.add(f"hid:{cid}")
                 if bt_mac:
@@ -815,14 +843,18 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
             # 容器里存在厂商自定义用量页（0xFF00+）说明设备有私有通道，
             # 只是协议还没适配——和"硬件根本没有电量"要分开告诉用户。
             if any(i.usage_page >= 0xFF00 for i in group):
-                detail = "厂商私有协议，暂未适配"
+                # 罗技通道能读的设备已由 scan_logitech 接管；还留在这里，
+                # 说明 HID++ 完全不应答（例如只用两节 AAA、本身不报电量的 K380），
+                # 这时不该说"暂未适配"，会让人误以为以后能读到百分比。
+                detail = ("此设备未提供电量接口"
+                          if any(i.vendor_id == LOGITECH for i in group)
+                          else "厂商私有协议，暂未适配")
                 if not is_bt and _looks_wireless(name, group):
                     transport = "2.4G"
             else:
                 detail = "设备未提供电量接口"
 
-        mac = _bt_mac(group[0].instance_id) if is_bt else None
-        key = f"bt:{mac}" if mac else f"hid:{cid}"
+        key = f"bt:{bt_mac}" if bt_mac else f"hid:{cid}"
         if key not in devices:
             devices[key] = Device(
                 key=key,

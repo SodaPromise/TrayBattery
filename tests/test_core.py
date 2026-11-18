@@ -209,12 +209,14 @@ class ProviderTests(unittest.TestCase):
             battery=76,
         )
 
-    def _patched_discover(self, ifaces, connection_map):
+    def _patched_discover(self, ifaces, connection_map, nodes=None):
         from unittest import mock
         from app import devapi
         patches = (
             mock.patch.object(devapi, "scan_hid_interfaces", return_value=ifaces),
-            mock.patch.object(devapi, "scan_pnp_nodes", return_value=[self._bt_gamepad_node()]),
+            mock.patch.object(devapi, "scan_pnp_nodes",
+                              return_value=(nodes if nodes is not None
+                                            else [self._bt_gamepad_node()])),
             mock.patch.object(devapi, "read_hid_battery", return_value=None),
             mock.patch.object(self.p, "bluetooth_connection_map", return_value=connection_map),
             mock.patch.object(self.p, "scan_logitech", return_value=([], set())),
@@ -259,6 +261,56 @@ class ProviderTests(unittest.TestCase):
                 self.assertEqual(dev.status, ONLINE)
                 self.assertEqual(dev.level, 76)
                 self.assertIn("已连接", dev.status_text())
+
+    def _k380_interface(self, cid):
+        from app import devapi
+        return devapi.HidInterface(
+            path="fake", vendor_id=0x046D, product_id=0xB342, version=0,
+            product="Multi-Device Keyboard K380", manufacturer="Logitech",
+            usage_page=0xFF00, usage=0x0001, in_len=7, out_len=7, feature_len=0,
+            instance_id=r"HID\{00001124-0000-1000-8000-00805F9B34FB}_VID&0002046D_PID&B342&COL06",
+            class_name="HIDClass", container_id=cid,
+        )
+
+    def test_scan_logitech_only_claims_containers_it_serves(self):
+        """回归：带 0xFF00 通道但 HID++ 静默的蓝牙键盘，容器不能被登记为已接管。"""
+        from unittest import mock
+        from app import devapi
+        cid = "CID-K380"
+        itf = self._k380_interface(cid)
+        fake_dev = mock.MagicMock()
+        fake_dev.valid, fake_dev.caps = True, object()
+        with mock.patch.object(devapi, "HidDevice", return_value=fake_dev), \
+             mock.patch.object(self.p, "HidppLink") as link_cls:
+            link = link_cls.return_value
+            link.device_name.return_value = ""
+            link.battery.return_value = (None, False, "")
+            devs, cids = self.p.scan_logitech([itf])
+            self.assertEqual(devs, [])
+            self.assertNotIn(cid, cids)
+            # 真读到设备时才由罗技分支独占，避免通用 HID 分支重复出一行
+            link.device_name.return_value = "MX Master 3S"
+            devs, cids = self.p.scan_logitech([itf])
+            self.assertEqual(len(devs), 1)
+            self.assertIn(cid, cids)
+
+    def test_discover_bluetooth_hid_keyboard_is_visible(self):
+        """回归：K380 的 HID 接口以 HID\\ 开头，不能被当有线的，也不能拿蓝牙 base UUID 当 MAC。"""
+        from app import devapi
+        cid = "6ab68406-dd73-55c2-b315-abfc00392db2"
+        node = devapi.PnpNode(
+            instance_id=r"BTHENUM\DEV_F47335053658\7&1BD402B6&0&BLUETOOTHDEVICE_F47335053658",
+            name="Keyboard K380", class_name="Bluetooth",
+            container_id=cid, enumerator="BTHENUM", battery=None,
+        )
+        found = self._patched_discover([self._k380_interface(cid)],
+                                       {"F47335053658": True}, nodes=[node])
+        dev = next((d for d in found if "K380" in d.name), None)
+        self.assertIsNotNone(dev, "蓝牙 HID 键盘不能从设备列表里消失")
+        self.assertEqual(dev.kind, KEYBOARD)
+        self.assertEqual(dev.transport, "蓝牙")
+        self.assertEqual(dev.key, "bt:F47335053658")
+        self.assertNotIn("00805F9B34FB", dev.key)
 
     def test_scan_vendor_cache_expires(self):
         """私有通道长时间无应答后，不能再无限期沿用旧电量。"""
