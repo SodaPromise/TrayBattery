@@ -209,7 +209,7 @@ class ProviderTests(unittest.TestCase):
             battery=76,
         )
 
-    def _patched_discover(self, ifaces, connection_map, nodes=None):
+    def _patched_discover(self, ifaces, connection_map, nodes=None, logi_battery=None):
         from unittest import mock
         from app import devapi
         patches = (
@@ -223,6 +223,8 @@ class ProviderTests(unittest.TestCase):
             mock.patch.object(self.p, "scan_huawei", return_value={}),
             mock.patch.object(self.p, "scan_compx", return_value={}),
             mock.patch.object(self.p, "scan_razer", return_value={}),
+            mock.patch.object(self.p, "scan_logitech_battery",
+                              return_value=logi_battery or {}),
         )
         for p in patches:
             p.start()
@@ -311,6 +313,88 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(dev.transport, "蓝牙")
         self.assertEqual(dev.key, "bt:F47335053658")
         self.assertNotIn("00805F9B34FB", dev.key)
+
+    def _k380_node(self, cid):
+        from app import devapi
+        return devapi.PnpNode(
+            instance_id=r"BTHENUM\DEV_F47335053658\7&1BD402B6&0&BLUETOOTHDEVICE_F47335053658",
+            name="Keyboard K380", class_name="Bluetooth",
+            container_id=cid, enumerator="BTHENUM", battery=None,
+        )
+
+    def test_hidpp2_long_name_and_battery(self):
+        """K380：36 字符名字按 16 字节分块，0x1000 电量 feature 返回 90%。"""
+        from unittest import mock
+        name = b"Bluetooth Multi-Device Keyboard K380"
+        features = {0x0005: 3, 0x1000: 6, 0x1004: 0, 0x1001: 0}
+
+        def reply(dev_idx, feat_idx, func, params=b"\x00\x00\x00"):
+            if feat_idx == 0x00:                      # ROOT.getFeature
+                fid = (params[0] << 8) | (params[1] if len(params) > 1 else 0)
+                return bytes([features.get(fid, 0), 0, 0]) + bytes(13)
+            if feat_idx == 3:                         # DEVICE_NAME
+                if func == 0:
+                    return bytes([len(name)]) + bytes(15)
+                off = params[0]
+                return name[off:off + 16].ljust(16, b"\x00")
+            if feat_idx == 6:                         # BATTERY_LEVEL_STATUS
+                return bytes([90, 50, 0]) + bytes(13)
+            return None
+
+        link = self.p.HidppLink.__new__(self.p.HidppLink)
+        link._features = {}
+        link.request = mock.Mock(side_effect=reply)
+        self.assertEqual(link.device_name(0xFF), name.decode())
+        self.assertEqual(link.battery(0xFF), (90, False, "level"))
+
+    def test_scan_logitech_skips_bluetooth_containers(self):
+        """蓝牙直连设备必须留给通用 HID 分支，不能由接收器分支独占。"""
+        from unittest import mock
+        from app import devapi
+        cid = "CID-K380"
+        itf = self._k380_interface(cid)
+        fake_dev = mock.MagicMock()
+        fake_dev.valid, fake_dev.caps = True, object()
+        with mock.patch.object(devapi, "HidDevice", return_value=fake_dev), \
+             mock.patch.object(self.p, "HidppLink") as link_cls:
+            link = link_cls.return_value
+            link.device_name.return_value = "Bluetooth Multi-Device Keyboard K380"
+            link.battery.return_value = (90, False, "level")
+            devs, cids = self.p.scan_logitech([itf])
+            self.assertEqual(len(devs), 1)
+            self.assertIn(cid, cids)
+            devs, cids = self.p.scan_logitech([itf], {cid})
+            self.assertEqual(devs, [])
+            self.assertEqual(cids, set())
+
+    def test_scan_logitech_battery_prefers_long_channel(self):
+        """同一设备同时有 7/20 字节通道时，先试能跑 HID++ 2.0 的长通道。"""
+        import dataclasses
+        from unittest import mock
+        cid = "6ab68406-dd73-55c2-b315-abfc00392db2"
+        short = self._k380_interface(cid)
+        long = dataclasses.replace(short, path="fake-long", usage=2,
+                                   in_len=20, out_len=20)
+        with mock.patch.object(self.p, "_logi_battery",
+                               return_value=(90, False)) as reader:
+            out = self.p.scan_logitech_battery(0, [short, long])
+        self.assertEqual(out, {cid: (90, False)})
+        self.assertEqual(reader.call_count, 1)
+        self.assertEqual(reader.call_args[0][0].out_len, 20)
+
+    def test_discover_k380_shows_hidpp_battery(self):
+        """K380 读到 90% 时仍是蓝牙键盘，保留真实 MAC 与在线状态。"""
+        cid = "6ab68406-dd73-55c2-b315-abfc00392db2"
+        found = self._patched_discover(
+            [self._k380_interface(cid)], {"F47335053658": True},
+            nodes=[self._k380_node(cid)], logi_battery={cid: (90, False)})
+        dev = next(d for d in found if "K380" in d.name)
+        self.assertEqual(dev.level, 90)
+        self.assertEqual(dev.status, ONLINE)
+        self.assertEqual(dev.transport, "蓝牙")
+        self.assertEqual(dev.key, "bt:F47335053658")
+        self.assertEqual(dev.detail, "")
+        self.assertFalse(any(d.key.startswith("hx:") for d in found))
 
     def test_scan_vendor_cache_expires(self):
         """私有通道长时间无应答后，不能再无限期沿用旧电量。"""

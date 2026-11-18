@@ -284,10 +284,11 @@ class _Cache:
 _HW_CACHE = _Cache()
 _CX_CACHE = _Cache()
 _RZ_CACHE = _Cache()
+_LG_CACHE = _Cache()
 
 
 def invalidate_vendor_caches() -> None:
-    for cache in (_HW_CACHE, _CX_CACHE, _RZ_CACHE):
+    for cache in (_HW_CACHE, _CX_CACHE, _RZ_CACHE, _LG_CACHE):
         cache.clear()
 
 
@@ -369,15 +370,23 @@ class HidppLink:
         if not idx:
             return None
         resp = self.request(dev_idx, idx, 0x00)
-        if not resp or not 0 < resp[0] < 8:
+        # getDeviceNameCount 返回名字总长度（K380 是 36）。早期版本把
+        # 上限写死 7，长名字设备会被误判成「没有 HID++ 设备」。
+        if not resp or not 0 < resp[0] <= 64:
             return None
+        count = resp[0]
         raw = bytearray()
-        for i in range(resp[0]):
-            part = self.request(dev_idx, idx, 0x01, bytes([i]))
+        for off in range(0, count, 16):
+            # getDeviceName(char_index) 每次返回从该字符偏移起的 16 字节块
+            part = self.request(dev_idx, idx, 0x01, bytes([off]))
             if not part:
                 break
-            raw.extend(part[1:1 + min(part[0], len(part) - 1)])
-        return raw.decode("utf-8", "ignore").replace("\x00", "").strip() or None
+            chunk = part[:16]
+            # 少数旧固件在首字节放本块的有效字符数：[长度][字符…]
+            if 0 < part[0] < 16 and part[0] == len(part) - 1:
+                chunk = part[1:]
+            raw.extend(chunk)
+        return raw[:count].decode("utf-8", "ignore").replace("\x00", "").strip() or None
 
     def battery(self, dev_idx: int) -> tuple[int | None, bool, str]:
         """返回 (电量, 是否充电, 数据来源)。"""
@@ -425,19 +434,28 @@ def _logi_device(product: str, index: int, name: str,
     return device
 
 
-def scan_logitech(ifaces: list[devapi.HidInterface] | None = None):
-    """扫描罗技 HID++ 设备，返回 (设备列表, 已被接管的容器 ID)。"""
+def scan_logitech(ifaces: list[devapi.HidInterface] | None = None,
+                  bluetooth_containers: set[str] | None = None):
+    """扫描罗技 HID++ 设备，返回 (设备列表, 已被接管的容器 ID)。
+
+    蓝牙直连设备（K380、MX Master 3 蓝牙模式等）交给通用 HID 分支处理，
+    那里才有真实 MAC 和连接状态判定；这里只负责 2.4G 接收器 / 有线设备。
+    """
     ifaces = devapi.scan_hid_interfaces() if ifaces is None else ifaces
     devices: list[Device] = []
     skip_containers: set[str] = set()
     seen_paths: set[str] = set()
-    for itf in ifaces:
+    # 20 字节长报文通道才支持 HID++ 2.0，7 字节短通道先试会白等超时
+    ordered = sorted(ifaces, key=lambda i: i.out_len, reverse=True)
+    for itf in ordered:
         if itf.vendor_id != LOGITECH or itf.usage_page != 0xFF00:
             continue
         if itf.path in seen_paths:
             continue
         seen_paths.add(itf.path)
         cid = itf.container_id
+        if bluetooth_containers and cid in bluetooth_containers:
+            continue
         dev = devapi.HidDevice(itf.path)
         if not dev.valid or not dev.caps:
             dev.close()
@@ -486,6 +504,63 @@ def scan_logitech(ifaces: list[devapi.HidInterface] | None = None):
         finally:
             dev.close()
     return devices, skip_containers
+
+
+def _logi_battery(itf: devapi.HidInterface) -> tuple[int, bool] | None:
+    """在一条罗技厂商通道上读 HID++ 电量，返回 (百分比, 是否充电)。"""
+    dev = devapi.HidDevice(itf.path)
+    if not dev.valid or not dev.caps:
+        dev.close()
+        return None
+    try:
+        link = HidppLink(dev)
+        for idx in (0xFF, 0x01):
+            level, charging, _ = link.battery(idx)
+            if level is not None:
+                return level, charging
+    finally:
+        dev.close()
+    return None
+
+
+def scan_logitech_battery(ttl: float = 60.0,
+                          ifaces: list[devapi.HidInterface] | None = None,
+                          exclude: set[str] | None = None
+                          ) -> dict[str, tuple[int, bool]]:
+    """按容器 ID 读罗技 HID++ 电量。
+
+    K380 这类蓝牙直连键盘不走接收器，但依然在 0xFF00 厂商通道上提供
+    HID++ 2.0 的 BATTERY_LEVEL_STATUS（0x1000）；并且同一台设备会同时
+    暴露 7 字节短通道和 20 字节长通道，只有长通道能跑 HID++ 2.0。
+    """
+    ifaces = devapi.scan_hid_interfaces() if ifaces is None else ifaces
+    groups: dict[str, list[devapi.HidInterface]] = defaultdict(list)
+    for itf in ifaces:
+        if (itf.vendor_id == LOGITECH and itf.usage_page == 0xFF00
+                and itf.out_len >= 7 and itf.container_id):
+            groups[itf.container_id].append(itf)
+
+    out: dict[str, tuple[int, bool]] = {}
+    for cid, group in groups.items():
+        if exclude and cid in exclude:
+            continue          # 接收器容器已由 scan_logitech 逐设备位处理
+        hit = _LG_CACHE.fresh(cid, ttl)
+        if hit:
+            out[cid] = hit[1:]
+            continue
+        got = None
+        for itf in sorted(group, key=lambda i: i.out_len, reverse=True):
+            got = _logi_battery(itf)
+            if got:
+                break
+        if got:
+            _LG_CACHE.put(cid, *got)
+            out[cid] = got
+        else:
+            last = _LG_CACHE.last(cid)
+            if last and time.time() - last[0] < _VENDOR_STALE_TTL:
+                out[cid] = last[1:]
+    return out
 
 
 # ------------------------------------------------------------------ 统一发现
@@ -756,17 +831,19 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
         )
         devices[device.key] = device
 
-    # 2) 罗技 HID++（2.4G 接收器 / 有线）
-    logi_devices, logi_containers = scan_logitech(ifaces)
+    # 2) 罗技 HID++（2.4G 接收器 / 有线）。蓝牙直连设备留在通用分支，
+    #    那里才有真实 MAC 和连接状态判定，电量由 scan_logitech_battery 提供。
+    ttl = 0 if force else 60.0
+    logi_devices, logi_containers = scan_logitech(ifaces, bt_container_ids)
     for device in logi_devices:
         devices[device.key] = device
 
     # 3) 其余 HID 外设（私有协议电量、标准电池接口或明确不支持）
-    ttl = 0 if force else 60.0
     vendor_battery = {
         **scan_huawei(ttl, ifaces),
         **scan_compx(ttl, ifaces),
         **scan_razer(ttl, ifaces),
+        **scan_logitech_battery(ttl, ifaces, logi_containers),
     }
     hid_groups: dict[str, list[devapi.HidInterface]] = defaultdict(list)
     for itf in ifaces:
@@ -803,7 +880,7 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
                 if bt_mac:
                     offline_bt_keys.add(f"bt:{bt_mac}")
         known = vendor_battery.get(cid)
-        if known is not None:
+        if known is not None and not is_bt:
             level, charging = known
             devices[f"hid:{cid}"] = Device(
                 key=f"hid:{cid}",
@@ -815,14 +892,17 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
             )
             continue
 
-        level, charging = None, False
-        for itf in group:
-            if itf.feature_len <= 0 and itf.in_len <= 0:
-                continue
-            got = devapi.read_hid_battery(itf)
-            if got is not None:
-                level, charging = got
-                break
+        # 蓝牙设备即使从私有通道读到电量，也必须走下面统一的构造路径，
+        # 才能保留 bt:MAC 身份、蓝牙标识和「断开就清电量」的判定。
+        level, charging = known if known is not None else (None, False)
+        if known is None:
+            for itf in group:
+                if itf.feature_len <= 0 and itf.in_len <= 0:
+                    continue
+                got = devapi.read_hid_battery(itf)
+                if got is not None:
+                    level, charging = got
+                    break
 
         # 已知厂商通道在、但这轮没应答：这是"设备休眠/离线"，不是"不支持"
         if level is None and any(_is_known_vendor_channel(i) for i in group):
@@ -843,9 +923,8 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
             # 容器里存在厂商自定义用量页（0xFF00+）说明设备有私有通道，
             # 只是协议还没适配——和"硬件根本没有电量"要分开告诉用户。
             if any(i.usage_page >= 0xFF00 for i in group):
-                # 罗技通道能读的设备已由 scan_logitech 接管；还留在这里，
-                # 说明 HID++ 完全不应答（例如只用两节 AAA、本身不报电量的 K380），
-                # 这时不该说"暂未适配"，会让人误以为以后能读到百分比。
+                # 私有通道在但这轮没读到值：罗技（含 K380 的 HID++ 2.0）
+                # 已经适配，读不到就是设备休眠或确实不报，不该说"暂未适配"。
                 detail = ("此设备未提供电量接口"
                           if any(i.vendor_id == LOGITECH for i in group)
                           else "厂商私有协议，暂未适配")
