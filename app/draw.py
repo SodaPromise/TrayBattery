@@ -371,6 +371,44 @@ def _mouse_outline(s: int, hw: float, hh: float, n: float = 2.4,
     return pts
 
 
+# 俯视手柄轮廓的右半边控制点（归一化坐标），左半边镜像得到。
+# 顶部中央略凹是肩线，底部中央的凹口是两只握把之间的空隙；
+# 主体压得宽扁、握把收短，16px 下才不会看成字母 M。
+_GAMEPAD_CTRL = [
+    (0.50, 0.27), (0.63, 0.24), (0.77, 0.21), (0.89, 0.24),
+    (0.96, 0.34), (0.95, 0.50), (0.91, 0.68), (0.85, 0.84),
+    (0.75, 0.86), (0.69, 0.78), (0.66, 0.68), (0.57, 0.64), (0.50, 0.63),
+]
+_GAMEPAD_SHRINK = 0.94        # 抵消插值 overshoot，并和键盘的视觉宽度对齐
+_GAMEPAD_Y_SHIFT = -0.035     # 两只握把把重心拉低了，整体上提才和键盘/耳机同高
+
+
+def _gamepad_point(nx: float, ny: float, s: int) -> tuple[float, float]:
+    return ((0.5 + (nx - 0.5) * _GAMEPAD_SHRINK) * s,
+            (0.5 + (ny - 0.5) * _GAMEPAD_SHRINK + _GAMEPAD_Y_SHIFT) * s)
+
+
+def _gamepad_outline(s: int, steps: int = 10):
+    """Catmull-Rom 插值成平滑闭合曲线。Pillow 没有贝塞尔填充，只能自己采样。"""
+    ctrl = _GAMEPAD_CTRL + [(1.0 - x, y) for x, y in reversed(_GAMEPAD_CTRL[1:-1])]
+    out, n = [], len(ctrl)
+    for i in range(n):
+        p0, p1, p2, p3 = (ctrl[(i - 1) % n], ctrl[i],
+                          ctrl[(i + 1) % n], ctrl[(i + 2) % n])
+        for j in range(steps):
+            t = j / steps
+            t2, t3 = t * t, t * t * t
+            x = 0.5 * (2 * p1[0] + (-p0[0] + p2[0]) * t
+                       + (2 * p0[0] - 5 * p1[0] + 4 * p2[0] - p3[0]) * t2
+                       + (-p0[0] + 3 * p1[0] - 3 * p2[0] + p3[0]) * t3)
+            y = 0.5 * (2 * p1[1] + (-p0[1] + p2[1]) * t
+                       + (2 * p0[1] - 5 * p1[1] + 4 * p2[1] - p3[1]) * t2
+                       + (-p0[1] + 3 * p1[1] - 3 * p2[1] + p3[1]) * t3)
+            # Catmull-Rom 会轻微 overshoot，统一收 6% 免得贴到图标边缘被裁平。
+            out.append(_gamepad_point(x, y, s))
+    return out
+
+
 def device_glyph(kind: str, px: int, color, weight: float = 0.085) -> Image.Image:
     """按 4 倍绘制再缩小，得到平滑的小图标。weight 是线宽占图标边长的比例。
 
@@ -418,6 +456,34 @@ def device_glyph(kind: str, px: int, color, weight: float = 0.085) -> Image.Imag
         # 耳罩
         d.rounded_rectangle((s * 0.08, s * 0.52, s * 0.30, s * 0.84), radius=int(s * 0.09), fill=color)
         d.rounded_rectangle((s * 0.70, s * 0.52, s * 0.92, s * 0.84), radius=int(s * 0.09), fill=color)
+    elif kind == "gamepad":
+        # 和鼠标同一套视觉语言：实心剪影 + 挖空按键。
+        # 16px 下四颗面键会糊成一团灰，只留十字键 + 两点；18px 以上画完整的 ABXY。
+        mask = Image.new("L", (s, s), 0)
+        md = ImageDraw.Draw(mask)
+        md.polygon(_gamepad_outline(s), fill=255)
+
+        def P(nx, ny):
+            return _gamepad_point(nx, ny, s)
+
+        arm, w = s * 0.078 * _GAMEPAD_SHRINK, s * 0.027
+        cx, cy = P(0.295, 0.425)
+        md.rounded_rectangle((cx - arm, cy - w, cx + arm, cy + w),
+                             radius=int(w * 0.5), fill=0)
+        md.rounded_rectangle((cx - w, cy - arm, cx + w, cy + arm),
+                             radius=int(w * 0.5), fill=0)
+        if px <= 16:
+            spots, r = ((-0.055, 0), (0.055, 0)), s * 0.042 * _GAMEPAD_SHRINK
+        else:
+            spots = ((0, -0.075), (0.075, 0), (0, 0.075), (-0.075, 0))
+            r = s * 0.031 * _GAMEPAD_SHRINK
+            x0, y0 = P(0.477, 0.322)
+            x1, y1 = P(0.523, 0.368)
+            md.ellipse((x0, y0, x1, y1), fill=0)
+        for dx, dy in spots:
+            bx, by = P(0.705 + dx, 0.425 + dy)
+            md.ellipse((bx - r, by - r, bx + r, by + r), fill=0)
+        im.paste(Image.new("RGBA", (s, s), color), (0, 0), mask)
     else:
         r = s * 0.30
         d.rounded_rectangle((s * 0.5 - r, s * 0.5 - r, s * 0.5 + r, s * 0.5 + r),

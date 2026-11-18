@@ -14,7 +14,7 @@ from ctypes import wintypes as w
 
 from . import devapi
 from .model import (
-    Device, HEADSET, KEYBOARD, MOUSE, OTHER, OFFLINE, ONLINE, UNSUPPORTED,
+    Device, GAMEPAD, HEADSET, KEYBOARD, MOUSE, OTHER, OFFLINE, ONLINE, UNSUPPORTED,
 )
 
 LOGITECH = 0x046D
@@ -66,6 +66,15 @@ def infer_kind(name: str, classes: set[str] | None = None) -> str:
         return HEADSET
     if any(k in low for k in ("音箱", "speaker", "sound joy", "soundlink")):
         return OTHER
+    # 手柄：Windows 上常见的名字是 "Xbox Wireless Controller" /
+    # "Wireless Controller"(PS4) / "Pro Controller"(Switch) / "DualSense ..."。
+    # 不单独用 "controller" 兜底，免得把音频、MIDI 这类控制器也认成手柄。
+    if any(k in low for k in ("gamepad", "game pad", "game controller", "手柄", "游戏手柄",
+                              "xbox", "wireless controller", "pro controller",
+                              "dualsense", "dualshock", "joy-con", "joycon",
+                              "switch pro", "steam controller", "8bitdo",
+                              "gamesir", "flydigi", "北通")):
+        return GAMEPAD
     cls = classes or set()
     if "Mouse" in cls and "Keyboard" not in cls:
         return MOUSE

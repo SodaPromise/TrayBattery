@@ -12,7 +12,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from app.model import (  # noqa: E402
-    AppState, Device, HEADSET, KEYBOARD, MOUSE, OFFLINE, ONLINE, UNSUPPORTED,
+    AppState, Device, GAMEPAD, HEADSET, KEYBOARD, MOUSE, OFFLINE, ONLINE, UNSUPPORTED,
 )
 from app.config import Config  # noqa: E402
 
@@ -38,6 +38,7 @@ class ModelTests(unittest.TestCase):
         self.assertEqual(dev.kind_label, "鼠标")
         self.assertEqual(Device("k", "x", HEADSET).kind_label, "耳机")
         self.assertEqual(Device("k", "x", KEYBOARD).kind_label, "键盘")
+        self.assertEqual(Device("k", "x", GAMEPAD).kind_label, "手柄")
 
     def test_sort_key_prefers_online_then_mouse(self):
         online_mouse = Device("a", "B", MOUSE, status=ONLINE)
@@ -128,6 +129,14 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.p.infer_kind("未知设备", {"Mouse"}), MOUSE)
         self.assertEqual(self.p.infer_kind("未知设备", {"AudioEndpoint"}), HEADSET)
         self.assertEqual(self.p.infer_kind("未知设备"), "other")
+        # 手柄：Windows 上常见的几种设备名都要认出来，
+        # 但音频 / MIDI 之类的控制器不能跟着误判成手柄
+        for name in ("Xbox Wireless Controller", "Wireless Controller",
+                     "DualSense Wireless Controller", "Pro Controller",
+                     "HID-compliant game controller", "8BitDo Pro 2", "游戏手柄"):
+            self.assertEqual(self.p.infer_kind(name), GAMEPAD, name)
+        self.assertEqual(self.p.infer_kind("Audio Controller"), "other")
+        self.assertEqual(self.p.infer_kind("Sound Joy"), "other")
 
     def test_bt_mac(self):
         iid = r"BTHENUM\DEV_001122AABBCC\7&1F2E3D4C&0&BLUETOOTHDEVICE_001122AABBCC"
@@ -302,6 +311,18 @@ class DrawTests(unittest.TestCase):
         self.assertIsNotNone(img.getbbox())
         charging = battery_glyph(16, 50, (47, 114, 240, 255), charging=True)
         self.assertIsNotNone(charging.getbbox())
+
+    def test_device_glyphs(self):
+        from app.draw import _gamepad_outline, device_glyph
+        for kind in ("mouse", "keyboard", "headset", "gamepad", "other"):
+            for px in (16, 18, 32):
+                img = device_glyph(kind, px, (240, 240, 240, 255), weight=0.115)
+                self.assertEqual(img.size, (px, px), (kind, px))
+                self.assertIsNotNone(img.getbbox(), (kind, px))
+        # 手柄轮廓是插值出来的，控制点一改就可能 overshoot 出画布被裁平
+        s = 64
+        self.assertTrue(all(0 <= x <= s and 0 <= y <= s
+                            for x, y in _gamepad_outline(s)))
 
 
 if __name__ == "__main__":
