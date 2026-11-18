@@ -48,6 +48,12 @@ def grab(box, path: str) -> None:
     print(f"  -> {path}  {(x1 - x0)}×{(y1 - y0)}")
 
 
+def grab_window(win, path: str, pad: int = 16) -> None:
+    """抓整个窗口，四周留一圈给阴影落下去。"""
+    x, y = win.pos
+    grab((x - pad, y - pad, x + win.w + pad, y + win.h + pad), path)
+
+
 def main() -> int:
     app = App(demo=True)
     try:
@@ -74,8 +80,22 @@ def main() -> int:
         pump(200)
         grab(box, os.path.join(OUT, "screenshot-bar-hover.png"))
 
-        # 两台设备的样子
+        # 面板与设置页：趁只有一台设备时抓，标题和内容都清爽
         bar.hover = None
+        bar.invalidate()
+        app.toggle_flyout_near_bar(bar)
+        pump(420)
+        grab_window(app.flyout_window, os.path.join(OUT, "screenshot-flyout-dark.png"))
+        app.flyout_window.hide()
+        pump(160)
+
+        app.open_settings()
+        pump(600)
+        grab_window(app.settings_window, os.path.join(OUT, "screenshot-settings-dark.png"))
+        app.settings_window.hide()
+        pump(160)
+
+        # 两台设备的样子
         keys = [d.key for d in app.state.devices[:2]]
         for key in keys:
             app.config.set_enabled(key, True)

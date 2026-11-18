@@ -1,13 +1,119 @@
-"""Pillow 绘制工具：抗锯齿画布、电池图标、设备图标。"""
+"""Pillow 绘制工具：抗锯齿画布、文字渲染、电池图标、设备图标。"""
 from __future__ import annotations
 
-from PIL import Image, ImageDraw, ImageFilter
+import math
+from collections import OrderedDict
+from functools import lru_cache
+
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from .theme import Theme
 
+# 文字超采样倍率：先把字形按 3 倍尺寸绘制再 LANCZOS 降采样。
+# 直接在 12~16px 上绘制时，FreeType 的栅格化会让横竖笔画粗细不匀（尤其中文），
+# 3 倍超采样能把笔画边缘摊到更多灰阶上，小字号看起来才细腻。
+TEXT_SS = 3
+_TEXT_CACHE: "OrderedDict[tuple, Image.Image]" = OrderedDict()
+_TEXT_CACHE_MAX = 512
+
+
+@lru_cache(maxsize=96)
+def _font_at(path: str, px: int, index: int, var: str | None):
+    font = ImageFont.truetype(path, px, index=index)
+    if var:
+        try:
+            font.set_variation_by_name(var)
+        except Exception:
+            pass
+    return font
+
+
+def _font_meta(font) -> tuple:
+    meta = getattr(font, "_tb", None)
+    if meta is None:
+        meta = (getattr(font, "path", ""), getattr(font, "size", 12),
+                getattr(font, "index", 0), None, 0.0)
+    return meta
+
+
+def _blend(img: Image.Image, src: Image.Image, x: float, y: float) -> None:
+    """把 src 贴到 img 上，自动裁掉越界部分（alpha_composite 不允许越界）。"""
+    x, y = int(round(x)), int(round(y))
+    if src.width < 1 or src.height < 1:
+        return
+    if x >= img.width or y >= img.height or x + src.width <= 0 or y + src.height <= 0:
+        return
+    left, top = max(0, -x), max(0, -y)
+    right = min(src.width, img.width - x)
+    bottom = min(src.height, img.height - y)
+    if (left, top, right, bottom) != (0, 0, src.width, src.height):
+        src = src.crop((left, top, right, bottom))
+    if x < 0:
+        x = 0
+    if y < 0:
+        y = 0
+    img.alpha_composite(src, (x, y))
+
+
+def render_text(s: str, font, fill, tracking: float = 0.0) -> Image.Image:
+    """把一段文字渲染成紧贴墨迹的位图（物理像素），带 LRU 缓存。
+
+    tracking 是字距（物理像素，可为负）；中文标题加一点正字距会更透气，
+    任务栏上的百分比则用一点负字距，数字才不会散。
+    """
+    path, px, index, var, boost = _font_meta(font)
+    fill = tuple(fill[:3]) + ((fill[3] if len(fill) > 3 else 255),)
+    if not s:
+        return Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    key = (path, px, index, var, boost, s, fill, round(tracking, 2))
+    cached = _TEXT_CACHE.get(key)
+    if cached is not None:
+        _TEXT_CACHE.move_to_end(key)
+        return cached
+
+    hi = _font_at(path, max(1, px * TEXT_SS), index, var)
+    probe = ImageDraw.Draw(Image.new("RGBA", (2, 2)))
+    stroke = boost * TEXT_SS
+    pad = 4 * TEXT_SS
+    if tracking:
+        advances = [probe.textlength(ch, font=hi) for ch in s]
+        total = sum(advances) + tracking * TEXT_SS * max(0, len(s) - 1)
+        layer = Image.new("RGBA", (int(total) + pad * 2, int(hi.size * 1.8) + pad * 2),
+                          (0, 0, 0, 0))
+        d = ImageDraw.Draw(layer)
+        x = float(pad)
+        for ch, adv in zip(s, advances):
+            d.text((x, pad), ch, font=hi, fill=fill, anchor="lt",
+                   stroke_width=stroke, stroke_fill=fill)
+            x += adv + tracking * TEXT_SS
+    else:
+        layer = Image.new("RGBA", (int(probe.textlength(s, font=hi) * 1.2) + pad * 2,
+                                  int(hi.size * 1.8) + pad * 2), (0, 0, 0, 0))
+        ImageDraw.Draw(layer).text((pad, pad), s, font=hi, fill=fill, anchor="lt",
+                                   stroke_width=stroke, stroke_fill=fill)
+    ink = layer.getbbox()
+    if ink is None:
+        out = Image.new("RGBA", (1, 1), (0, 0, 0, 0))
+    else:
+        ink = layer.crop(ink)
+        out = ink.resize((max(1, int(round(ink.width / TEXT_SS))),
+                          max(1, int(round(ink.height / TEXT_SS)))), Image.LANCZOS)
+    _TEXT_CACHE[key] = out
+    if len(_TEXT_CACHE) > _TEXT_CACHE_MAX:
+        _TEXT_CACHE.popitem(last=False)
+    return out
+
+
+def clear_text_cache() -> None:
+    _TEXT_CACHE.clear()
+
 
 class Canvas:
-    """设计坐标（逻辑像素）× zoom 得到物理像素，形状再按 ss 超采样，文字按物理分辨率绘制。"""
+    """设计坐标（逻辑像素）× zoom 得到物理像素，形状再按 ss 超采样。
+
+    文字不参与形状的超采样：它在 finish() 里按物理分辨率单独合成，
+    这样字形不会被形状缩放二次模糊。
+    """
 
     def __init__(self, size: tuple[int, int], zoom: float = 1.0, ss: int = 2) -> None:
         self.zoom = zoom
@@ -44,36 +150,57 @@ class Canvas:
                     width=max(1, self.S(width)), joint="curve")
 
     def shadow(self, b, r: float, blur: float, color, alpha: int, dy: float = 0) -> None:
-        pad = int(blur * 2.2 * self.ss)
-        w_, h_ = self.img.size
-        layer = Image.new("L", (w_, h_), 0)
-        d = ImageDraw.Draw(layer)
-        box = self.box((b[0], b[1] + dy, b[2], b[3] + dy))
-        d.rounded_rectangle(box, radius=self.S(r), fill=alpha)
-        layer = layer.filter(ImageFilter.GaussianBlur(max(0.5, blur * self.zoom * self.ss)))
-        tint = Image.new("RGBA", (w_, h_), color)
+        """投影只模糊它所在的一小块，并在半分辨率上做高斯模糊。
+
+        阴影是低频图形，半分辨率模糊再放大肉眼看不出来，
+        但省掉了整张画布的分配和几十毫秒的模糊时间。
+        """
+        pad = int(blur * 2.8 * self.zoom * self.ss) + 2
+        x0, y0, x1, y1 = self.box((b[0], b[1] + dy, b[2], b[3] + dy))
+        left, top = max(0, x0 - pad), max(0, y0 - pad)
+        right, bottom = min(self.img.width, x1 + pad), min(self.img.height, y1 + pad)
+        if right - left < 2 or bottom - top < 2:
+            return
+        q = 0.5
+        sw, sh = max(1, int(round((right - left) * q))), max(1, int(round((bottom - top) * q)))
+        layer = Image.new("L", (sw, sh), 0)
+        ImageDraw.Draw(layer).rounded_rectangle(
+            ((x0 - left) * q, (y0 - top) * q, (x1 - left) * q, (y1 - top) * q),
+            radius=max(1, int(round(self.S(r) * q))), fill=alpha)
+        layer = layer.filter(ImageFilter.GaussianBlur(
+            max(0.5, blur * self.zoom * self.ss * q)))
+        layer = layer.resize((right - left, bottom - top), Image.BILINEAR)
+        tint = Image.new("RGBA", layer.size, color)
         tint.putalpha(layer)
-        self.img.alpha_composite(tint)
+        self.img.alpha_composite(tint, (left, top))
 
     # -- 文字 / 位图（延后绘制）
-    def text(self, xy, s: str, font, fill, anchor: str = "lm") -> None:
-        self._ops.append(("text", (xy[0] * self.zoom, xy[1] * self.zoom), s, font, fill, anchor))
+    def text(self, xy, s: str, font, fill, anchor: str = "lm", tracking: float = 0.0) -> None:
+        """anchor 的纵向以"墨迹"为准：m 表示字形实心的垂直中点，不是基线盒。
+
+        这样 95%、设置、完成 这些不同字体/字号的文字，混排时视觉中线才对得齐。
+        """
+        self._ops.append(("text", (xy[0] * self.zoom, xy[1] * self.zoom), s, font,
+                          fill, anchor, tracking * self.zoom))
 
     def paste(self, im: Image.Image, xy) -> None:
         self._ops.append(("paste", (int(round(xy[0] * self.zoom)), int(round(xy[1] * self.zoom))), im))
 
     def finish(self) -> Image.Image:
         img = self.img.resize((self.w, self.h), Image.LANCZOS) if self.ss != 1 else self.img
-        d = ImageDraw.Draw(img)
         for op in self._ops:
             if op[0] == "text":
-                _, xy, s, font, fill, anchor = op
-                d.text(xy, s, font=font, fill=fill, anchor=anchor)
+                _, xy, s, font, fill, anchor, tracking = op
+                bmp = render_text(s, font, fill, tracking)
+                ax, ay = anchor[0], anchor[1]
+                dx = 0.0 if ax == "l" else (-bmp.width / 2 if ax == "m" else -bmp.width)
+                dy = 0.0 if ay in "ta" else (-bmp.height / 2 if ay in "ms" else -bmp.height)
+                _blend(img, bmp, xy[0] + dx, xy[1] + dy)
             else:
                 _, xy, im = op
                 if im.mode != "RGBA":
                     im = im.convert("RGBA")
-                img.alpha_composite(im, xy)
+                _blend(img, im, xy[0], xy[1])
         return img
 
 
@@ -150,24 +277,50 @@ def level_color(theme: Theme, level: int | None, charging: bool = False, status:
 
 
 # ------------------------------------------------------------------ 设备图标
+def _mouse_outline(s: int, hw: float, hh: float, n: float = 2.4,
+                   taper: float = 0.08, steps: int = 180):
+    """俯视鼠标的轮廓点：超椭圆主体 + 上端（按键端）收窄。
+
+    纯圆角矩形在 16px 下像一根胶囊，看不出"鼠标头宽尾窄"的特征；
+    超椭圆指数 n=2.4 保留了圆润的肩部，taper 让前端略窄，比例更像真鼠标。
+    """
+    cx, cy = s / 2, s / 2
+    pts = []
+    for i in range(steps):
+        th = 2 * math.pi * i / steps
+        c, sn = math.cos(th), math.sin(th)
+        x = hw * math.copysign(abs(c) ** (2.0 / n), c)
+        y = hh * math.copysign(abs(sn) ** (2.0 / n), sn)
+        if y < 0:
+            x *= 1.0 - taper * (-y / hh)
+        pts.append((cx + x, cy + y))
+    return pts
+
+
 def device_glyph(kind: str, px: int, color, weight: float = 0.085) -> Image.Image:
-    """按 4 倍绘制再缩小，得到平滑的小图标。weight 是线宽占图标边长的比例。"""
+    """按 4 倍绘制再缩小，得到平滑的小图标。weight 是线宽占图标边长的比例。
+
+    鼠标一律画实心剪影再挖缝：16px 下描边只剩一圈细线，整只鼠标比旁边的
+    键盘、耳机单薄一大截；挖空的分缝反而更像系统自带的状态图标。
+    """
     s = px * 4
     im = Image.new("RGBA", (s, s), (0, 0, 0, 0))
     d = ImageDraw.Draw(im)
     lw = max(2, int(round(s * weight)))
 
     if kind == "mouse":
-        # 机身
-        body = (s * 0.29, s * 0.06, s * 0.71, s * 0.94)
-        d.rounded_rectangle(body, radius=int(s * 0.21), outline=color, width=lw)
-        # 中缝
-        d.line([(s * 0.5, s * 0.10), (s * 0.5, s * 0.40)], fill=color, width=lw)
-        # 滚轮
-        d.rounded_rectangle(
-            (s * 0.455, s * 0.20, s * 0.545, s * 0.33),
-            radius=int(s * 0.045), fill=color,
-        )
+        # 俯视鼠标：机身 0.60×0.87（约 1:1.45），比真鼠标略宽——
+        # 16px 下按真实比例画会瘦成一根胶囊，和旁边的键盘图标也不成比例。
+        # 关键是那道"横向分缝"：把前段切成左右两个按键，再用竖缝当滚轮分界。
+        hw, hh = s * 0.300, s * 0.435
+        split = s * 0.375
+        gap = max(2, int(s * 0.070))
+        mask = Image.new("L", (s, s), 0)
+        md = ImageDraw.Draw(mask)
+        md.polygon(_mouse_outline(s, hw, hh), fill=255)
+        md.line([(0, split), (s, split)], fill=0, width=gap)
+        md.line([(s * 0.5, 0), (s * 0.5, split)], fill=0, width=gap)
+        im.paste(Image.new("RGBA", (s, s), color), (0, 0), mask)
     elif kind == "keyboard":
         d.rounded_rectangle(
             (s * 0.04, s * 0.26, s * 0.96, s * 0.74), radius=int(s * 0.10),

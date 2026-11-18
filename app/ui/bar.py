@@ -19,9 +19,9 @@ from ..theme import bar_skin, card_skin, forget_bar_skin
 from .base import LayerWindow
 
 GLYPH = 16          # 与托盘图标同尺寸（逻辑像素）
-GAP_GLYPH = 5       # 图标与数字之间
+GAP_GLYPH = 6       # 图标与数字之间
 GAP_CHIP = 12       # 两台设备之间
-PAD_X = 8           # 左右内边距
+PAD_X = 9           # 左右内边距
 ITEM_H = 28         # 悬停高亮高度
 PAD = 12            # 没有任务栏可嵌时的悬浮留白
 H_FLOAT = 32
@@ -60,7 +60,7 @@ class BarWindow(LayerWindow):
         specs = []
         for dev in self.chips()[0]:
             numeric = dev.status == ONLINE and dev.level is not None
-            font = f.get(11.5, "semibold" if numeric else "regular", numeric)
+            font = f.get(12, "semibold" if numeric else "regular", numeric)
             label = self._label(dev)
             specs.append((dev, label, font, self.measure(label, font),
                           self._dev_color(dev, skin)))
@@ -159,17 +159,18 @@ class BarWindow(LayerWindow):
         for i, (dev, label, font, width, color) in enumerate(specs):
             if i:
                 x += GAP_CHIP
-            c.paste(device_glyph(dev.kind, self.px(GLYPH), color, weight=0.10),
+            c.paste(device_glyph(dev.kind, self.px(GLYPH), color, weight=0.115),
                     (x, cy - GLYPH / 2))
             if dev.charging and dev.status == ONLINE:
                 c.paste(charge_bolt(self.px(9), color),
                         (x + GLYPH - 5.5, cy + GLYPH / 2 - 5))
-            # +0.5：小字号下把基线压回视觉中心
-            c.text((x + GLYPH + GAP_GLYPH, cy + 0.5), label, font, color, "lm")
+            numeric = dev.status == ONLINE and dev.level is not None
+            c.text((x + GLYPH + GAP_GLYPH, cy), label, font, color, "lm",
+                   tracking=-0.2 if numeric else 0.0)
             x += GLYPH + GAP_GLYPH + width
 
         if extra:
-            c.text((x + GAP_CHIP, cy + 0.5), f"+{extra}", f.get(10, "semibold"),
+            c.text((x + GAP_CHIP, cy), f"+{extra}", f.get(10, "semibold"),
                    self._dim_color(), "lm")
 
         self._set_hits(w)

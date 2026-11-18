@@ -381,7 +381,7 @@ def segmented(c: Canvas, box, options: list[str], index: int, fonts: Fonts, them
         if i == index:
             c.rrect((sx0 + 2, y0 + 2, sx1 - 2, y1 - 2), 5.5, fill=theme.c("overlay"))
             c.rrect((sx0 + 2, y0 + 2, sx1 - 2, y1 - 2), 5.5, outline=theme.c("line"), width=0.8)
-        c.text(((sx0 + sx1) / 2, (y0 + y1) / 2 + 0.5), opt,
+        c.text(((sx0 + sx1) / 2, (y0 + y1) / 2), opt,
                fonts.get(11, "semibold" if i == index else "regular"),
                theme.c("text") if i == index else theme.c("sub"), "mm")
     return rects

@@ -189,10 +189,13 @@ def main() -> int:
         pump(120)
         check(settings._content_h > settings._body_h, "设备较多时内容可滚动")
         settings.on_wheel(-240)
-        pump(80)
-        check(settings.scroll > 0, "滚轮可以滚动")
+        pump(40)
+        mid = settings.scroll
+        check(mid > 0, "滚轮可以滚动")
+        pump(200)
+        check(settings.scroll > mid, "滚动是逐帧缓动的，不是瞬间跳过去")
         settings.on_wheel(9999)
-        check(settings.scroll == 0, "滚回顶部会夹住")
+        wait_for(lambda: settings.scroll == 0, "滚回顶部会夹住", timeout=1.2)
 
         settings.on_click("dev:demo:keyboard")
         pump(80)

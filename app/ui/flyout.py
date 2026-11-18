@@ -64,14 +64,15 @@ class FlyoutWindow(LayerWindow):
         c.rrect(panel, 16, fill=theme.c("panel"), outline=theme.c("line"), width=1)
 
         hits = []
-        c.paste(app_mark(self.px(30), theme), (pad + 18, pad + 16))
-        c.text((pad + 58, pad + 25), "设备电量", f.get(15, "semibold"), theme.c("text"), "lm")
-        c.text((pad + 58, pad + 44), self._subtitle(), f.get(10.5), theme.c("sub"), "lm")
+        c.paste(app_mark(self.px(30), theme), (pad + 18, pad + 17))
+        c.text((pad + 58, pad + 23), "设备电量", f.get(15, "semibold"),
+               theme.c("text"), "lm", tracking=0.3)
+        c.text((pad + 58, pad + 41), self._subtitle(), f.get(10.5), theme.c("sub"), "lm")
 
-        gb = (pad + panel_w - 46, pad + 12, pad + panel_w - 12, pad + 46)
+        gb = (pad + panel_w - 46, pad + 16, pad + panel_w - 12, pad + 48)
         if self.hover == "gear":
             c.rrect(gb, 9, fill=theme.c("card_hover"))
-        c.paste(gear_icon(self.px(17), theme.c("sub")), (gb[0] + 8.5, gb[1] + 8.5))
+        c.paste(gear_icon(self.px(17), theme.c("sub")), (gb[0] + 7.5, gb[1] + 7.5))
         hits.append((gb, "gear", "hand"))
 
         c.line([(pad + 16, pad + HEADER_H - 6), (pad + panel_w - 16, pad + HEADER_H - 6)],
@@ -142,15 +143,16 @@ class FlyoutWindow(LayerWindow):
 
         max_text_w = panel_w - 62 - 116
         name = ellipsize(self._measure, dev.name, f.get(13, "semibold"), max_text_w * self.scale)
-        c.text((pad + 62, cy - 8), name, f.get(13, "semibold"), theme.c("text"), "lm")
-        c.text((pad + 62, cy + 12), dev.status_text(), f.get(10.5), theme.c("sub"), "lm")
+        c.text((pad + 62, cy - 9), name, f.get(13, "semibold"), theme.c("text"),
+               "lm", tracking=0.1)
+        c.text((pad + 62, cy + 10), dev.status_text(), f.get(10.5), theme.c("sub"), "lm")
 
         right = pad + panel_w - 18
         if dev.status == ONLINE and dev.level is not None:
             color = level_color(theme, dev.level, dev.charging, dev.status)
             pct = f"{dev.level}%"
             font = f.get(14, "semibold", True)
-            c.text((right, cy), pct, font, color, "rm")
+            c.text((right, cy), pct, font, color, "rm", tracking=-0.2)
             tw = self.measure(pct, font)
             c.paste(battery_glyph(self.px(24), dev.level, color, charging=dev.charging,
                                   outline=theme.c("faint", 185)),
@@ -174,7 +176,8 @@ class FlyoutWindow(LayerWindow):
         top = pad + HEADER_H
         c.paste(battery_glyph(self.px(38), None, theme.c("faint"),
                               outline=theme.c("faint", 150)), (cx - 19, top + 18))
-        c.text((cx, top + 78), "暂无可显示的设备", f.get(12.5, "semibold"), theme.c("text"), "mm")
+        c.text((cx, top + 78), "暂无可显示的设备", f.get(12.5, "semibold"),
+               theme.c("text"), "mm", tracking=0.3)
         c.text((cx, top + 97), "在设置中选择要显示的鼠标、键盘或耳机", f.get(10), theme.c("sub"), "mm")
         box = (cx - 44, top + 114, cx + 44, top + 142)
         c.rrect(box, 8, fill=theme.c("accent"))

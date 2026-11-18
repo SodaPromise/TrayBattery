@@ -54,7 +54,7 @@ LIGHT = Theme(
     card_hover="#F3F5F9",
     text="#16181D",
     sub="#6A7280",
-    faint="#9AA1AC",
+    faint="#8B93A0",
     line="#E8EAF0",
     track="#E6E8EE",
     accent="#2F72F0",
@@ -204,14 +204,26 @@ def card_skin(theme: Theme) -> BarSkin:
     return DARK_BAR if theme.dark else LIGHT_BAR
 
 
+# (文件, 字体集合索引, 可变字重实例, 合成字重增强)
+# 中文没有 Semibold：雅黑只有 regular / bold，bold 在 12~17px 会把笔画糊成一团。
+# 所以中文半粗改用"regular + 细描边"的合成字重，笔画均匀、不粘连。
+# 西文与数字用 Win11 自己的 Segoe UI Variable，按光学尺寸选 Text 实例，小字号更清楚。
 FONT_FILES = {
-    ("regular", False): ("msyh.ttc", 1),
-    ("semibold", False): ("msyhbd.ttc", 1),
-    ("bold", False): ("msyhbd.ttc", 1),
-    ("light", False): ("msyhl.ttc", 1),
-    ("regular", True): ("segoeui.ttf", 0),
-    ("semibold", True): ("seguisb.ttf", 0),
-    ("bold", True): ("segoeuib.ttf", 0),
+    ("regular", False): ("msyh.ttc", 1, None, 0.0),
+    ("semibold", False): ("msyh.ttc", 1, None, 0.16),
+    ("bold", False): ("msyhbd.ttc", 1, None, 0.0),
+    ("light", False): ("msyhl.ttc", 1, None, 0.0),
+    ("regular", True): ("SegUIVar.ttf", 0, "Regular", 0.0),
+    ("semibold", True): ("SegUIVar.ttf", 0, "Semibold Text", 0.0),
+    ("bold", True): ("SegUIVar.ttf", 0, "Bold Text", 0.0),
+}
+
+# SegUIVar 缺失时的退路：同样按字重选文件
+_SEGOE_FALLBACK = {
+    "regular": ("segoeui.ttf", 0, None, 0.0),
+    "semibold": ("seguisb.ttf", 0, None, 0.0),
+    "bold": ("segoeuib.ttf", 0, None, 0.0),
+    "light": ("segoeuil.ttf", 0, None, 0.0),
 }
 
 
@@ -219,28 +231,44 @@ class Fonts:
     def __init__(self, scale: float) -> None:
         self.scale = scale
         self._cache: dict[tuple[int, str, bool], object] = {}
-        self._paths: dict[str, tuple[str, int]] = {}
+        self._paths: dict[tuple[str, bool], tuple[str, int, str | None, float]] = {}
 
-    def _path(self, weight: str, digit: bool) -> tuple[str, int]:
-        key = f"{weight}{digit}"
+    def _spec(self, weight: str, digit: bool) -> tuple[str, int, str | None, float]:
+        key = (weight, digit)
         if key not in self._paths:
-            fname, idx = FONT_FILES.get((weight, digit), FONT_FILES[("regular", False)])
+            fname, idx, var, boost = FONT_FILES.get(key, FONT_FILES[("regular", False)])
             path = os.path.join(FONT_DIR, fname)
             if not os.path.exists(path):
-                path, idx = os.path.join(FONT_DIR, "segoeui.ttf"), 0
-            self._paths[key] = (path, idx)
+                if digit or weight in _SEGOE_FALLBACK:
+                    fname, idx, var, boost = _SEGOE_FALLBACK.get(
+                        weight, _SEGOE_FALLBACK["regular"])
+                else:
+                    fname, idx, var, boost = "segoeui.ttf", 0, None, 0.0
+                path = os.path.join(FONT_DIR, fname)
+            self._paths[key] = (path, idx, var, boost)
         return self._paths[key]
 
-
     def get(self, size: float, weight: str = "regular", digit: bool = False):
-        px = max(8, int(round(size * self.scale)))
+        # 字号取整到物理像素：15.625 这种半像素字号会被 FreeType 栅格化成
+        # 一条粗一条细，宁可落在整数像素上。
+        px = max(9, int(round(size * self.scale)))
         key = (px, weight, digit)
-        if key not in self._cache:
-            from PIL import ImageFont
+        cached = self._cache.get(key)
+        if cached is not None:
+            return cached
+        from PIL import ImageFont
 
-            path, idx = self._path(weight, digit)
-            try:
-                self._cache[key] = ImageFont.truetype(path, px, index=idx)
-            except Exception:
-                self._cache[key] = ImageFont.load_default()
-        return self._cache[key]
+        path, idx, var, boost = self._spec(weight, digit)
+        try:
+            font = ImageFont.truetype(path, px, index=idx)
+            if var:
+                try:
+                    font.set_variation_by_name(var)
+                except Exception:
+                    pass
+        except Exception:
+            font = ImageFont.load_default()
+        # 渲染层靠这份元数据在 3 倍尺寸上重建同款字体
+        font._tb = (path, px, idx, var, boost)
+        self._cache[key] = font
+        return font
