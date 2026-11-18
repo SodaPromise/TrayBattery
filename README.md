@@ -1,6 +1,6 @@
 # 电量助手 · TrayBattery
 
-[![tests](https://github.com/SodagreenPromise/TrayBattery/actions/workflows/tests.yml/badge.svg)](https://github.com/SodagreenPromise/TrayBattery/actions/workflows/tests.yml)
+[![tests](https://github.com/SodaPromise/TrayBattery/actions/workflows/tests.yml/badge.svg)](https://github.com/SodaPromise/TrayBattery/actions/workflows/tests.yml)
 [![license](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![python](https://img.shields.io/badge/python-3.10%2B-blue.svg)](requirements.txt)
 [![platform](https://img.shields.io/badge/platform-Windows%2010%20%7C%2011-lightgrey.svg)](#运行)
