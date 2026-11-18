@@ -205,6 +205,34 @@ def main() -> int:
         check(bool(frames) and frames[-1] > 0, "滚轮可以滚动")
         check(len(frames) >= 3 and frames[0] < frames[-1],
               "滚动是逐帧缓动的，不是瞬间跳过去")
+
+        # 滚动后按钮必须还能点：命中区域要按当前 scroll 重建，
+        # 只注册一次的话滚完就全部落空。这里走真实鼠标路径（hit_at ->
+        # down/up -> on_click），以前的断言直接调 on_click 会漏掉这类问题。
+        check(len(settings.hits) > 3 and
+              all(any(h == name for _, h, _ in settings.hits)
+                  for name in ("close", "reset", "done")),
+              "页眉页脚按钮已注册命中区域")
+        vis = settings._visible_body_hits()
+        target = next((r for r, h, _ in vis if h.startswith("dev:")), None)
+        check(target is not None, "滚动后仍能看到设备行")
+
+        def real_click(rect):
+            cx = (rect[0] + rect[2]) / 2 * settings.scale
+            cy = (rect[1] + rect[3]) / 2 * settings.scale
+            settings.local_cursor = lambda: (cx, cy)
+            got = settings.hit_at()[0]
+            settings._on_mouse_down()
+            settings._on_mouse_up()
+            return got
+
+        key = next(h[4:] for _, h, _ in vis if h.startswith("dev:"))
+        was = app.is_selected(key)
+        check(real_click(target) == "dev:" + key, "滚动后设备行可以被命中")
+        check(app.is_selected(key) != was, "滚动后点击设备行真的生效")
+        check(real_click(target) == "dev:" + key, "再点一次仍可命中")
+        check(app.is_selected(key) == was, "再点一次恢复原状态")
+        del settings.local_cursor
         settings.on_wheel(9999)
         wait_for(lambda: settings.scroll == 0, "滚回顶部会夹住", timeout=1.2)
 

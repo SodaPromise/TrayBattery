@@ -183,6 +183,9 @@ class SettingsWindow(LayerWindow):
 
         self._paint_hover(img)
         self._paint_scrollbar(img)
+        # 命中区域跟着滚动位置走：基类 hit_at() 只看 self.hits，
+        # 不注册的话所有鼠标点击都会落空（滚动后尤其明显）。
+        self.set_hits(self._all_hits())
         return img
 
     def _base_image(self):
@@ -418,6 +421,19 @@ class SettingsWindow(LayerWindow):
             out.append(((x0 + PAD, max(top, ay0), x1 + PAD, min(bottom, ay1)), hid, cur))
         return out
 
+    def _all_hits(self):
+        """页眉/页脚的固定按钮 + 当前可见的滚动控件。
+
+        固定按钮不随滚动动；滚动控件的矩形由 _visible_body_hits() 按
+        当前 scroll 换算过，并且已经裁到内容可视区内，滚出去的不会误命中。
+        """
+        fixed = [
+            (self._close_box(), "close", "hand"),
+            (self._reset_box(), "reset", "hand"),
+            (self._done_box(), "done", "hand"),
+        ]
+        return fixed + list(self._visible_body_hits())
+
     def _hit_rect(self, hid: str):
         for rect, h, _ in self._visible_body_hits():
             if h == hid:
@@ -455,9 +471,10 @@ class SettingsWindow(LayerWindow):
         self._last_scroll_paint = time.perf_counter()
         delta = self._scroll_target - self.scroll
         if abs(delta) <= 0.75:          # 不足一像素就直接落位，肉眼看不出来
-            if self.scroll != self._scroll_target:
-                self.scroll = self._scroll_target
-                self.invalidate()
+            self.scroll = self._scroll_target
+            # 停稳这一帧也要重绘：render() 会按最终位置重建命中区域，
+            # 否则最后那不到 1px 的偏差会让点击区域停在上一个位置。
+            self.invalidate()
             return True
         # 指数缓动：越接近目标步子越小，停下来的那一帧不会"顿"一下
         self.scroll += delta * SCROLL_EASE
