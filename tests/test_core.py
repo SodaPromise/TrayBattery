@@ -209,7 +209,8 @@ class ProviderTests(unittest.TestCase):
             battery=76,
         )
 
-    def _patched_discover(self, ifaces, connection_map, nodes=None, logi_battery=None):
+    def _patched_discover(self, ifaces, connection_map, nodes=None, logi_battery=None,
+                          ble_devices=None):
         from unittest import mock
         from app import devapi
         patches = (
@@ -225,6 +226,7 @@ class ProviderTests(unittest.TestCase):
             mock.patch.object(self.p, "scan_razer", return_value={}),
             mock.patch.object(self.p, "scan_logitech_battery",
                               return_value=logi_battery or {}),
+            mock.patch.object(self.p, "ble_snapshot", return_value=ble_devices or []),
         )
         for p in patches:
             p.start()
@@ -472,6 +474,175 @@ class ProviderTests(unittest.TestCase):
         self.assertIsNone(self.p._RZ_CACHE.last("c"))
 
 
+class BleBatteryTests(unittest.TestCase):
+    """HOGP 蓝牙鼠标：GATT 电量、通用驱动名、跨链路重复行。"""
+
+    CID = "CID-BLE"
+    MAC = "AABBCCDDEEFF"
+    GENERIC = "符合蓝牙低能耗 GATT 的 HID 设备"
+
+    def setUp(self):
+        from app import devapi, providers
+        self.d, self.p = devapi, providers
+        providers.invalidate_vendor_caches()
+
+    def _ble(self, battery=88, name="HUAWEI Mouse CD26-R"):
+        return SimpleNamespace(path="fake", mac=self.MAC, container_id=self.CID,
+                               name=name, battery=battery)
+
+    def _hogp(self, battery=88):
+        """一台在线的蓝牙直连鼠标：HID 接口没有产品名，PnP 节点只有通用驱动名。"""
+        from unittest import mock
+        iface = self.d.HidInterface(
+            path="fake", vendor_id=0x0002, product_id=0x0001, version=0,
+            product="", manufacturer="", usage_page=0x01, usage=0x02,
+            in_len=8, out_len=0, feature_len=0,
+            instance_id=r"HID\{00001124-0000-1000-8000-00805F9B34FB}_VID&00020001_PID&0001&COL01",
+            class_name="HIDClass", container_id=self.CID,
+        )
+        node = self.d.PnpNode(
+            instance_id=rf"BTHLE\DEV_{self.MAC}\7&2B2E0F6E&0&{self.MAC}",
+            name=self.GENERIC, class_name="Mouse", container_id=self.CID,
+            enumerator="BTHLE", battery=None,
+        )
+        patches = (
+            mock.patch.object(self.d, "scan_hid_interfaces", return_value=[iface]),
+            mock.patch.object(self.d, "scan_pnp_nodes", return_value=[node]),
+            mock.patch.object(self.d, "read_hid_battery", return_value=None),
+            mock.patch.object(self.p, "bluetooth_connection_map",
+                              return_value={self.MAC: True}),
+            mock.patch.object(self.p, "scan_logitech", return_value=([], set())),
+            mock.patch.object(self.p, "scan_huawei", return_value={}),
+            mock.patch.object(self.p, "scan_compx", return_value={}),
+            mock.patch.object(self.p, "scan_razer", return_value={}),
+            mock.patch.object(self.p, "scan_logitech_battery", return_value={}),
+            mock.patch.object(self.p, "ble_snapshot",
+                              return_value=[self._ble(battery=battery)]),
+        )
+        for p in patches:
+            p.start()
+        try:
+            return self.p.discover()
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+    def test_generic_hid_name_is_filtered(self):
+        self.assertTrue(self.p._is_generic_hid_name(self.GENERIC))
+        self.assertTrue(self.p._is_generic_hid_name(
+            "Bluetooth LE GATT compliant HID device"))
+        self.assertFalse(self.p._is_generic_hid_name("HUAWEI Mouse CD26-R"))
+        self.assertEqual(
+            self.p._preferred_name([self.GENERIC, "HUAWEI Mouse CD26-R"], "兜底"),
+            "HUAWEI Mouse CD26-R")
+        self.assertEqual(self.p._preferred_name([self.GENERIC], "兜底"), "兜底")
+
+    def test_ble_maps_by_container_and_mac(self):
+        names, levels = self.p.ble_maps([self._ble()])
+        self.assertEqual(names[self.CID], "HUAWEI Mouse CD26-R")
+        self.assertEqual(names["mac:" + self.MAC], "HUAWEI Mouse CD26-R")
+        self.assertEqual(levels[self.CID], 88)
+        self.assertEqual(levels["mac:" + self.MAC], 88)
+
+    def test_generic_ble_name_is_not_a_product(self):
+        names, _ = self.p.ble_maps([self._ble(name=self.GENERIC)])
+        self.assertEqual(names, {})
+
+    def test_ble_snapshot_never_reuses_stale_level(self):
+        self.p.ble_snapshot(devices=[self._ble(battery=88)])
+        # 断开后 GATT 读值失败，旧读数绝不能被沿用
+        fresh = self.p.ble_snapshot(devices=[self._ble(battery=None)])
+        self.assertIsNone(fresh[0].battery)
+        self.assertEqual(self.p.ble_maps(fresh)[1], {})
+
+    def test_discover_hogp_mouse_uses_ble_name_and_battery(self):
+        dev = next(d for d in self._hogp() if d.key == "bt:" + self.MAC)
+        self.assertEqual(dev.name, "HUAWEI Mouse CD26-R")
+        self.assertEqual(dev.kind, MOUSE)
+        self.assertEqual(dev.transport, "蓝牙")
+        self.assertEqual(dev.status, ONLINE)
+        self.assertEqual(dev.level, 88)
+
+    def test_discover_disconnected_ble_mouse_has_no_level(self):
+        """断开时系统仍可能残留 88% 的旧电量属性，GATT 读不到值就不能显示。"""
+        from unittest import mock
+        node = self.d.PnpNode(
+            instance_id=rf"BTHLE\DEV_{self.MAC}\7&2B2E0F6E&0&{self.MAC}",
+            name="HUAWEI Mouse CD26-R", class_name="Bluetooth",
+            container_id=self.CID, enumerator="BTHLE", battery=88,
+        )
+        patches = (
+            mock.patch.object(self.d, "scan_hid_interfaces", return_value=[]),
+            mock.patch.object(self.d, "scan_pnp_nodes", return_value=[node]),
+            mock.patch.object(self.d, "read_hid_battery", return_value=None),
+            mock.patch.object(self.p, "bluetooth_connection_map",
+                              return_value={self.MAC: False}),
+            mock.patch.object(self.p, "scan_logitech", return_value=([], set())),
+            mock.patch.object(self.p, "scan_huawei", return_value={}),
+            mock.patch.object(self.p, "scan_compx", return_value={}),
+            mock.patch.object(self.p, "scan_razer", return_value={}),
+            mock.patch.object(self.p, "scan_logitech_battery", return_value={}),
+            mock.patch.object(self.p, "ble_snapshot",
+                              return_value=[self._ble(battery=None)]),
+        )
+        for p in patches:
+            p.start()
+        try:
+            found = self.p.discover()
+        finally:
+            for p in reversed(patches):
+                p.stop()
+        dev = next(d for d in found if d.key == "bt:" + self.MAC)
+        self.assertEqual(dev.status, OFFLINE)
+        self.assertIsNone(dev.level)
+        self.assertEqual(dev.last_level, 88)
+
+
+class LinkSwitchTests(unittest.TestCase):
+    def test_same_device(self):
+        from app.main import _same_device
+        self.assertTrue(_same_device("HUAWEI Mouse CD26-R", "HUAWEI Mouse CD26-R"))
+        self.assertTrue(_same_device("HUAWEI Mouse CD26-R", "HUAWEI Mouse CD26-R-05"))
+        self.assertFalse(_same_device("HUAWEI Mouse CD28S", "HUAWEI Mouse CD28S Pro Max"))
+        self.assertFalse(_same_device("Xbox Wireless Controller", "HUAWEI Mouse CD26-R"))
+
+    def test_merge_offline_migrates_selection(self):
+        from app.main import App
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(os.path.join(td, "config.json"))
+            cfg.set_enabled("hid:CID-USB", True)
+            cfg.known["hid:CID-USB"] = {
+                "name": "HUAWEI Mouse CD26-R", "kind": MOUSE, "transport": "USB",
+            }
+            app = App.__new__(App)
+            app.config = cfg
+            online = Device("bt:AABBCCDDEEFF", "HUAWEI Mouse CD26-R-05",
+                            MOUSE, "蓝牙", ONLINE, level=88)
+            out = app._merge_offline([online])
+            self.assertEqual(len(out), 1)
+            self.assertEqual(out[0].key, "bt:AABBCCDDEEFF")
+            self.assertFalse(cfg.is_enabled("hid:CID-USB"))
+            self.assertTrue(cfg.is_enabled("bt:AABBCCDDEEFF"))
+
+    def test_merge_offline_keeps_unrelated_device(self):
+        from app.main import App
+        with tempfile.TemporaryDirectory() as td:
+            cfg = Config(os.path.join(td, "config.json"))
+            cfg.set_enabled("hid:CID-OTHER", True)
+            cfg.known["hid:CID-OTHER"] = {
+                "name": "MX Keys Mini", "kind": KEYBOARD, "transport": "USB",
+            }
+            app = App.__new__(App)
+            app.config = cfg
+            out = app._merge_offline([
+                Device("bt:AABBCCDDEEFF", "HUAWEI Mouse CD26-R-05",
+                       MOUSE, "蓝牙", ONLINE, level=88),
+            ])
+            self.assertEqual(len(out), 2)
+            self.assertEqual({d.status for d in out}, {ONLINE, OFFLINE})
+            self.assertTrue(cfg.is_enabled("hid:CID-OTHER"))
+
+
 @unittest.skipUnless(IS_WINDOWS, "HID 结构体仅 Windows")
 class DevapiTests(unittest.TestCase):
     def setUp(self):
@@ -508,6 +679,28 @@ class DevapiTests(unittest.TestCase):
         vc.u.Range.UsageMin = 0x20
         vc.u.Range.UsageMax = 0x2F
         self.assertEqual(self.d._battery_usage(vc), 0x20)
+
+    def test_gatt_uuid16(self):
+        u = self.d._BthLeUuid()
+        u.IsShortUuid = 1
+        u.Value.ShortUuid = 0x2A19
+        self.assertEqual(self.d._gatt_uuid16(u), 0x2A19)
+        u.IsShortUuid = 0
+        g = u.Value.LongUuid
+        g.Data1, g.Data2, g.Data3 = 0x0000180F, 0, 0x1000
+        for i, byte in enumerate(b"\x80\x00\x00\x80\x5f\x9b\x34\xfb"):
+            g.Data4[i] = byte
+        self.assertEqual(self.d._gatt_uuid16(u), 0x180F)
+        g.Data4[0] = 0x81                     # 非 Bluetooth base UUID
+        self.assertIsNone(self.d._gatt_uuid16(u))
+
+    def test_gatt_battery_invalid_path(self):
+        self.assertIsNone(self.d.read_gatt_battery(r"\\?\bthle#dev_deadbeef#{x}"))
+
+    def test_ble_interface_guid(self):
+        # 早期误写成 781aee18-773a-11d2-...，枚举永远返回 0 个接口
+        self.assertEqual(self.d.GUID_BLE_DEVICE_INTERFACE,
+                         "781aee18-7733-4ce4-add0-91f41c67b592")
 
 
 class ThemeTests(unittest.TestCase):

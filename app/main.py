@@ -23,6 +23,25 @@ from .ui.flyout import PANEL_W as FLYOUT_W, PAD as FLYOUT_PAD, FlyoutWindow
 from .ui.settings import SettingsWindow
 
 
+def _same_device(a: str, b: str) -> bool:
+    """判断两个设备名是否指向同一台物理设备。
+
+    蓝牙链路的名字常带 `-05` / `-01718` 之类的配对后缀，而 USB 接收器
+    链路用裸型号名。只接受「一方是另一方前缀且差异很小」，避免把
+    CD28S 和 CD28S Pro 这类不同型号误合并。
+    """
+    def norm(text: str) -> str:
+        return "".join(ch for ch in (text or "").lower() if ch.isalnum())
+
+    x, y = norm(a), norm(b)
+    if not x or not y:
+        return False
+    if x == y:
+        return True
+    short, long_ = (x, y) if len(x) <= len(y) else (y, x)
+    return long_.startswith(short) and len(long_) - len(short) <= 4
+
+
 class App:
     def __init__(self, demo: bool = False, open_panel: bool = False,
                  open_settings: bool = False) -> None:
@@ -138,15 +157,25 @@ class App:
         keys = {d.key for d in found}
         enabled = set(self.config["enabled"] or [])
         out = list(found)
+        online = [d for d in found if d.status != OFFLINE]
         for key in enabled:
             if key in keys:
                 continue
             info = self.config.known.get(key)
             if not info:
                 continue
+            name = info.get("name", "设备")
+            twin = next((d for d in online if _same_device(name, d.name)), None)
+            if twin is not None:
+                # 同一台设备换了链路（2.4G 接收器 → 蓝牙）。旧的离线行不再补，
+                # 勾选状态迁到当前在线的那条，避免列表里出现两行同名设备。
+                if twin.key not in enabled:
+                    self.config.set_enabled(key, False)
+                    self.config.set_enabled(twin.key, True)
+                continue
             out.append(Device(
                 key=key,
-                name=info.get("name", "设备"),
+                name=name,
                 kind=info.get("kind", "other"),
                 transport=info.get("transport", "蓝牙"),
                 status=OFFLINE,

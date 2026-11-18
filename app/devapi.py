@@ -684,3 +684,227 @@ def read_hid_battery(itf: HidInterface) -> tuple[int, bool] | None:
         HidD_FreePreparsedData(pp)
         dev.close()
     return None
+
+
+# ------------------------------------------------------------------ BLE GATT
+# BLE 外设（HID over GATT）通常把电量放在标准 Battery Service 0x180F 的
+# Battery Level 特征 0x2A19 上。Windows 有时会把它映射成
+# DEVPKEY_Bluetooth_Battery，但 HOGP 的通用 HID 节点上常常没有这个属性，
+# 此时直接读 GATT 是唯一可靠的取电路。全部用 Win32，不引入 WinRT 依赖。
+GUID_BLE_DEVICE_INTERFACE = "781aee18-7733-4ce4-add0-91f41c67b592"
+BLE_BATTERY_SERVICE = 0x180F
+BLE_BATTERY_LEVEL = 0x2A19
+_HRESULT_MORE_DATA = 0x800700EA
+
+
+class _BthLeUuidValue(ctypes.Union):
+    _fields_ = [("ShortUuid", w.USHORT), ("LongUuid", GUIDStruct)]
+
+
+class _BthLeUuid(ctypes.Structure):
+    _fields_ = [("IsShortUuid", ctypes.c_ubyte), ("Value", _BthLeUuidValue)]
+
+
+class _GattService(ctypes.Structure):
+    _fields_ = [("ServiceUuid", _BthLeUuid), ("AttributeHandle", w.USHORT)]
+
+
+class _GattCharacteristic(ctypes.Structure):
+    _fields_ = [
+        ("ServiceHandle", w.USHORT),
+        ("CharacteristicUuid", _BthLeUuid),
+        ("AttributeHandle", w.USHORT),
+        ("CharacteristicValueHandle", w.USHORT),
+        ("IsBroadcastable", ctypes.c_ubyte),
+        ("IsReadable", ctypes.c_ubyte),
+        ("IsWritable", ctypes.c_ubyte),
+        ("IsWritableWithoutResponse", ctypes.c_ubyte),
+        ("IsSignedWritable", ctypes.c_ubyte),
+        ("IsNotifiable", ctypes.c_ubyte),
+        ("IsIndicatable", ctypes.c_ubyte),
+        ("HasExtendedProperties", ctypes.c_ubyte),
+    ]
+
+
+class _GattValue(ctypes.Structure):
+    _fields_ = [("DataSize", w.ULONG), ("Data", ctypes.c_ubyte * 512)]
+
+
+_bluetooth_apis = None
+
+
+def _gatt_api():
+    """惰性绑定 BluetoothAPIs.dll；系统不支持时返回 None。"""
+    global _bluetooth_apis
+    if _bluetooth_apis is None:
+        try:
+            dll = ctypes.WinDLL("BluetoothAPIs")
+        except OSError:
+            _bluetooth_apis = False
+            return None
+        _bluetooth_apis = (
+            _f(dll, "BluetoothGATTGetServices", ctypes.c_long, HANDLE, w.USHORT,
+               ctypes.POINTER(_GattService), ctypes.POINTER(w.USHORT), w.ULONG),
+            _f(dll, "BluetoothGATTGetCharacteristics", ctypes.c_long, HANDLE,
+               ctypes.POINTER(_GattService), w.USHORT,
+               ctypes.POINTER(_GattCharacteristic), ctypes.POINTER(w.USHORT), w.ULONG),
+            _f(dll, "BluetoothGATTGetCharacteristicValue", ctypes.c_long, HANDLE,
+               ctypes.POINTER(_GattCharacteristic), w.ULONG,
+               ctypes.POINTER(_GattValue), ctypes.POINTER(w.USHORT), w.ULONG),
+        )
+    return _bluetooth_apis or None
+
+
+def _gatt_uuid16(u: _BthLeUuid) -> int | None:
+    """把 16 位或 Bluetooth base 128 位 UUID 归一成 16 位短码。"""
+    if u.IsShortUuid:
+        return int(u.Value.ShortUuid)
+    g = u.Value.LongUuid
+    if (int(g.Data2) == 0 and int(g.Data3) == 0x1000
+            and bytes(g.Data4) == b"\x80\x00\x00\x80\x5f\x9b\x34\xfb"):
+        return int(g.Data1) & 0xFFFF
+    return None
+
+
+@dataclass
+class BleDevice:
+    path: str
+    mac: str | None
+    container_id: str | None
+    name: str
+    battery: int | None = None
+
+
+def _gatt_services(handle, get_services) -> list[_GattService]:
+    count = w.USHORT(0)
+    r = get_services(handle, 0, None, ctypes.byref(count), 0) & 0xFFFFFFFF
+    if r not in (0, _HRESULT_MORE_DATA) or not count.value:
+        return []
+    services = (_GattService * count.value)()
+    got = w.USHORT(count.value)
+    if (get_services(handle, count.value, services, ctypes.byref(got), 0)
+            & 0xFFFFFFFF) != 0:
+        return []
+    return [services[i] for i in range(min(got.value, count.value))]
+
+
+def gatt_service_uuids(path: str) -> list[int]:
+    """列出 BLE 设备提供的 GATT 服务短 UUID（诊断用）。"""
+    api = _gatt_api()
+    if not api:
+        return []
+    handle = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None)
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        return []
+    try:
+        out = []
+        for svc in _gatt_services(handle, api[0]):
+            code = _gatt_uuid16(svc.ServiceUuid)
+            if code is not None:
+                out.append(code)
+        return out
+    finally:
+        k.kernel32.CloseHandle(handle)
+
+
+def read_gatt_battery(path: str) -> int | None:
+    """读 BLE Battery Level 特征；设备断开或不支持时返回 None。
+
+    刻意不加 FORCE_READ_FROM_CACHE：断开时 Windows 仍会给出服务列表，
+    但实时读取会失败，正好避免「没连却显示旧电量」的幽灵读数。
+    """
+    api = _gatt_api()
+    if not api:
+        return None
+    get_services, get_chars, get_value = api
+    handle = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE, None, OPEN_EXISTING, 0, None)
+    if not handle or handle == INVALID_HANDLE_VALUE:
+        return None
+    try:
+        for svc in _gatt_services(handle, get_services):
+            if _gatt_uuid16(svc.ServiceUuid) != BLE_BATTERY_SERVICE:
+                continue
+            ccount = w.USHORT(0)
+            r = get_chars(handle, ctypes.byref(svc), 0, None,
+                          ctypes.byref(ccount), 0) & 0xFFFFFFFF
+            if r not in (0, _HRESULT_MORE_DATA) or not ccount.value:
+                return None
+            chars = (_GattCharacteristic * ccount.value)()
+            cgot = w.USHORT(ccount.value)
+            if (get_chars(handle, ctypes.byref(svc), ccount.value, chars,
+                          ctypes.byref(cgot), 0) & 0xFFFFFFFF) != 0:
+                return None
+            for j in range(min(cgot.value, ccount.value)):
+                ch = chars[j]
+                if (_gatt_uuid16(ch.CharacteristicUuid) != BLE_BATTERY_LEVEL
+                        or not ch.IsReadable):
+                    continue
+                value = _GattValue()
+                value.DataSize = ctypes.sizeof(value.Data)
+                actual = w.USHORT(0)
+                r = get_value(handle, ctypes.byref(ch), ctypes.sizeof(value),
+                              ctypes.byref(value), ctypes.byref(actual), 0) & 0xFFFFFFFF
+                if r != 0 or value.DataSize < 1:
+                    return None
+                level = int(value.Data[0])
+                return level if 0 <= level <= 100 else None
+        return None
+    finally:
+        k.kernel32.CloseHandle(handle)
+
+
+def scan_ble_devices(read_battery: bool = True) -> list[BleDevice]:
+    """枚举 BLE 设备接口，附带真实产品名、容器 ID、MAC 与 GATT 电量。"""
+    out: list[BleDevice] = []
+    g = guid(GUID_BLE_DEVICE_INTERFACE)
+    hdev = SetupDiGetClassDevsW(ctypes.byref(g), None, None,
+                                DIGCF_PRESENT | DIGCF_DEVICEINTERFACE)
+    if not hdev or hdev == INVALID_HANDLE_VALUE:
+        return out
+    try:
+        idx = 0
+        did = SP_DEVINFO_DATA()
+        did.cbSize = ctypes.sizeof(SP_DEVINFO_DATA)
+        while SetupDiEnumDeviceInfo(hdev, idx, ctypes.byref(did)):
+            idx += 1
+            inst = ctypes.create_unicode_buffer(512)
+            SetupDiGetDeviceInstanceIdW(hdev, ctypes.byref(did), inst, 512, None)
+            iid = inst.value.upper()
+            mac = None
+            if "DEV_" in iid:
+                tail = iid.split("DEV_", 1)[1][:12]
+                if len(tail) == 12 and all(c in "0123456789ABCDEF" for c in tail):
+                    mac = tail
+            cid = _read_prop(hdev, did, KEY_CONTAINER_ID)[0]
+            name = (str(_read_prop(hdev, did, KEY_FRIENDLY_NAME)[0] or "")
+                    or _read_reg_prop(hdev, did, SPDRP_FRIENDLYNAME) or ""
+                    or _read_reg_prop(hdev, did, SPDRP_DEVICEDESC) or "")
+            iface = SP_DEVICE_INTERFACE_DATA()
+            iface.cbSize = ctypes.sizeof(SP_DEVICE_INTERFACE_DATA)
+            i = 0
+            while SetupDiEnumDeviceInterfaces(hdev, ctypes.byref(did),
+                                              ctypes.byref(g), i, ctypes.byref(iface)):
+                i += 1
+                needed = w.DWORD(0)
+                SetupDiGetDeviceInterfaceDetailW(hdev, ctypes.byref(iface), None, 0,
+                                                 ctypes.byref(needed), None)
+                if needed.value <= 0:
+                    continue
+                buf = ctypes.create_string_buffer(needed.value)
+                ctypes.cast(buf, ctypes.POINTER(w.DWORD))[0] = (
+                    8 if ctypes.sizeof(ctypes.c_void_p) == 8 else 6)
+                if SetupDiGetDeviceInterfaceDetailW(hdev, ctypes.byref(iface), buf,
+                                                    needed.value, None, None):
+                    path = ctypes.wstring_at(ctypes.addressof(buf) + ctypes.sizeof(w.DWORD))
+                    if path:
+                        out.append(BleDevice(
+                            path=path, mac=mac,
+                            container_id=str(cid) if cid else None,
+                            name=str(name).strip(),
+                            battery=read_gatt_battery(path) if read_battery else None,
+                        ))
+    finally:
+        SetupDiDestroyDeviceInfoList(hdev)
+    return out

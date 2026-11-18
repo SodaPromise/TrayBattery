@@ -61,6 +61,34 @@ def _looks_wireless(name: str, ifaces: list[devapi.HidInterface]) -> bool:
 
 
 # ------------------------------------------------------------------ 名称与类型
+# Windows 给 BLE / HID 设备生成的驱动描述，不是产品名。HOGP 设备的容器里
+# 往往同时有真实产品节点和这类通用节点，取错名字就会多出一行「幽灵设备」。
+_GENERIC_HID_NAMES = (
+    "符合蓝牙低能耗 gatt 的 hid 设备",
+    "符合蓝牙低能耗gatt的hid设备",
+    "符合蓝牙低功耗 gatt 的 hid 设备",
+    "符合蓝牙低功耗gatt的hid设备",
+    "bluetooth le gatt compliant hid device",
+    "bluetooth low energy gatt compliant hid device",
+    "hid-compliant device",
+    "hid 设备",
+    "hid device",
+)
+
+
+def _is_generic_hid_name(name: str) -> bool:
+    low = (name or "").strip().lower()
+    return (not low or low in _GENERIC_HID_NAMES
+            or low.startswith(("hid-compliant ", "符合 hid 标准的")))
+
+
+def _preferred_name(names, fallback: str = "") -> str:
+    """从 PnP/HID 名字里挑真实产品名，跳过 Windows 通用驱动描述。"""
+    cleaned = [clean_bt_name(str(n)).strip() for n in names if n]
+    real = [n for n in cleaned if n and not _is_generic_hid_name(n)]
+    return min(real, key=len) if real else fallback
+
+
 def clean_bt_name(name: str) -> str:
     out = name.strip()
     for suffix in _BT_SERVICE_SUFFIX:
@@ -287,9 +315,52 @@ _RZ_CACHE = _Cache()
 _LG_CACHE = _Cache()
 
 
+_BLE_SNAPSHOT: tuple[float, list[devapi.BleDevice]] | None = None
+
+
 def invalidate_vendor_caches() -> None:
+    global _BLE_SNAPSHOT
+    _BLE_SNAPSHOT = None
     for cache in (_HW_CACHE, _CX_CACHE, _RZ_CACHE, _LG_CACHE):
         cache.clear()
+
+
+def ble_snapshot(ttl: float = 60.0,
+                 devices: list[devapi.BleDevice] | None = None
+                 ) -> list[devapi.BleDevice]:
+    """BLE 设备快照：真实产品名、容器 ID、MAC 与 GATT 电量。
+
+    和私有协议缓存不同，GATT 读失败**绝不沿用旧值**：断开的 BLE 设备仍能被
+    枚举到服务列表，缓存旧读数会重新制造「没连却显示百分比」的幽灵读数。
+    """
+    global _BLE_SNAPSHOT
+    if devices is not None:
+        _BLE_SNAPSHOT = (time.time(), devices)
+        return devices
+    now = time.time()
+    if _BLE_SNAPSHOT and ttl > 0 and now - _BLE_SNAPSHOT[0] < ttl:
+        return _BLE_SNAPSHOT[1]
+    try:
+        devices = devapi.scan_ble_devices()
+    except Exception:
+        devices = []
+    _BLE_SNAPSHOT = (now, devices)
+    return devices
+
+
+def ble_maps(devices: list[devapi.BleDevice]) -> tuple[dict[str, str], dict[str, int]]:
+    """把 BLE 快照按容器 ID / MAC 建成「产品名」和「电量」两张索引。"""
+    names: dict[str, str] = {}
+    levels: dict[str, int] = {}
+    for dev in devices:
+        keys = [k for k in (dev.container_id,
+                            "mac:" + dev.mac if dev.mac else None) if k]
+        for key in keys:
+            if dev.name and not _is_generic_hid_name(dev.name):
+                names.setdefault(key, dev.name)
+            if dev.battery is not None:
+                levels[key] = dev.battery
+    return names, levels
 
 
 def _scan_vendor(ifaces, match, reader, cache: _Cache, ttl: float):
@@ -799,6 +870,8 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
                 bt_container_macs.setdefault(cid, mac)
     connected_map = bluetooth_connection_map()
     active_keys = active_bluetooth_keys(ifaces)
+    ttl = 0 if force else 60.0
+    ble_names, ble_levels = ble_maps(ble_snapshot(ttl))
     devices: dict[str, Device] = {}
     offline_bt_keys: set[str] = set()
 
@@ -811,11 +884,13 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
 
     for key, group in bt_groups.items():
         bt_containers.add(key)
-        names = [clean_bt_name(n.name) for n in group]
-        name = min((x for x in names if x), key=len, default="蓝牙设备")
+        mac = next((m for m in (_bt_mac(n.instance_id) for n in group) if m), None)
+        fallback = ble_names.get(key, "")
+        if not fallback and mac:
+            fallback = ble_names.get("mac:" + mac, "")
+        name = _preferred_name([n.name for n in group], fallback or "蓝牙设备")
         kind = infer_kind(name, classes.get(key))
         level = max(n.battery or 0 for n in group)
-        mac = next((m for m in (_bt_mac(n.instance_id) for n in group) if m), None)
         is_bt = any(n.enumerator.upper().startswith("BTH") for n in group)
         connected = (not is_bt) or bluetooth_is_connected(
             mac, key, name, connected_map, active_keys)
@@ -833,7 +908,6 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
 
     # 2) 罗技 HID++（2.4G 接收器 / 有线）。蓝牙直连设备留在通用分支，
     #    那里才有真实 MAC 和连接状态判定，电量由 scan_logitech_battery 提供。
-    ttl = 0 if force else 60.0
     logi_devices, logi_containers = scan_logitech(ifaces, bt_container_ids)
     for device in logi_devices:
         devices[device.key] = device
@@ -844,6 +918,10 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
         **scan_compx(ttl, ifaces),
         **scan_razer(ttl, ifaces),
         **scan_logitech_battery(ttl, ifaces, logi_containers),
+        # BLE Battery Service：HOGP 设备常常既没有系统电量属性，也不暴露
+        # 厂商私有 HID 集合，标准 GATT 电量特征是唯一能读到的通道。
+        **{cid: (level, False) for cid, level in ble_levels.items()
+           if not cid.startswith("mac:")},
     }
     hid_groups: dict[str, list[devapi.HidInterface]] = defaultdict(list)
     for itf in ifaces:
@@ -858,12 +936,6 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
         if cid in bt_containers:
             continue
         cls = classes.get(cid, set())
-        name = next((i.product for i in group if i.product), "")
-        if not name:
-            name = next((n.name for n in nodes if n.container_id == cid and n.name), "HID 设备")
-        kind = infer_kind(name, cls)
-        if kind == OTHER:
-            continue
         is_bt = cid in bt_container_ids or any(
             i.instance_id.upper().startswith("BTH") for i in group)
         bt_mac = None
@@ -875,11 +947,37 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
                         bt_mac = _bt_mac(itf.instance_id)
                         if bt_mac:
                             break
-            if not bluetooth_is_connected(bt_mac, cid, name, connected_map, active_keys):
-                offline_bt_keys.add(f"hid:{cid}")
-                if bt_mac:
-                    offline_bt_keys.add(f"bt:{bt_mac}")
+
+        # 名字优先取 HID 产品名，再取同容器 PnP 节点名，最后用 BLE 节点的
+        # 真实产品名兜底。HOGP 容器里常见「符合蓝牙低能耗 GATT 的 HID
+        # 设备」这种驱动描述，直接拿来当名字会多出一行看不懂的幽灵设备。
+        name = _preferred_name([i.product for i in group], "")
+        if not name:
+            name = _preferred_name([n.name for n in nodes
+                                    if n.container_id == cid], "")
+        if not name:
+            name = ble_names.get(cid, "")
+        if not name and bt_mac:
+            name = ble_names.get("mac:" + bt_mac, "")
+        if not name:
+            # 万一这台系统没给 BLE 产品名，保留通用驱动名，至少别让整台设备
+            # 因为判成 OTHER 而从列表里消失（类名含 Mouse 时仍能正确分类）。
+            name = next((n.name for n in nodes
+                         if n.container_id == cid and n.name), "HID 设备")
+        kind = infer_kind(name, cls)
+        if kind == OTHER:
+            continue
+        if is_bt and not bluetooth_is_connected(
+                bt_mac, cid, name, connected_map, active_keys):
+            offline_bt_keys.add(f"hid:{cid}")
+            if bt_mac:
+                offline_bt_keys.add(f"bt:{bt_mac}")
         known = vendor_battery.get(cid)
+        if known is None and bt_mac:
+            # 容器 ID 可能与 BLE 节点不一致，再按 MAC 兜一次
+            ble_level = ble_levels.get("mac:" + bt_mac)
+            if ble_level is not None:
+                known = (ble_level, False)
         if known is not None and not is_bt:
             level, charging = known
             devices[f"hid:{cid}"] = Device(
