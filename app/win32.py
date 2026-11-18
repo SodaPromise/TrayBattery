@@ -75,8 +75,10 @@ SWP_NOZORDER = 0x0004
 SWP_NOACTIVATE = 0x0010
 SWP_SHOWWINDOW = 0x0040
 SWP_HIDEWINDOW = 0x0080
+SWP_FRAMECHANGED = 0x0020
 
 GWL_EXSTYLE = -20
+GWL_STYLE = -16
 GWLP_USERDATA = -21
 WS_POPUP = 0x80000000
 WS_CHILD = 0x40000000
@@ -310,6 +312,8 @@ UpdateLayeredWindow = _f(
 )
 SetWindowLongPtrW = _f(user32, "SetWindowLongPtrW", ctypes.c_ssize_t, HWND, ctypes.c_int, ctypes.c_ssize_t)
 GetWindowLongPtrW = _f(user32, "GetWindowLongPtrW", ctypes.c_ssize_t, HWND, ctypes.c_int)
+SetParent = _f(user32, "SetParent", HWND, HWND, HWND)
+GetParent = _f(user32, "GetParent", HWND, HWND)
 SetTimer = _f(user32, "SetTimer", ctypes.c_size_t, HWND, ctypes.c_size_t, w.UINT, ctypes.c_void_p)
 KillTimer = _f(user32, "KillTimer", w.BOOL, HWND, ctypes.c_size_t)
 InvalidateRect = _f(user32, "InvalidateRect", w.BOOL, HWND, ctypes.POINTER(RECT), w.BOOL)
@@ -325,7 +329,7 @@ SystemParametersInfoW = _f(user32, "SystemParametersInfoW", w.BOOL, w.UINT, w.UI
 MonitorFromPoint = _f(user32, "MonitorFromPoint", HMONITOR, POINT, w.DWORD)
 GetMonitorInfoW = _f(user32, "GetMonitorInfoW", w.BOOL, HMONITOR, ctypes.POINTER(MONITORINFO))
 FindWindowW = _f(user32, "FindWindowW", HWND, w.LPCWSTR, w.LPCWSTR)
-FindWindowExW = _f(user32, "FindWindowExW", HWND, HWND, w.LPCWSTR, w.LPCWSTR)
+FindWindowExW = _f(user32, "FindWindowExW", HWND, HWND, HWND, w.LPCWSTR, w.LPCWSTR)
 RegisterWindowMessageW = _f(user32, "RegisterWindowMessageW", w.UINT, w.LPCWSTR)
 CreatePopupMenu = _f(user32, "CreatePopupMenu", HMENU)
 AppendMenuW = _f(user32, "AppendMenuW", w.BOOL, HMENU, w.UINT, ctypes.c_size_t, w.LPCWSTR)
@@ -412,6 +416,47 @@ def monitor_work_area(x: int, y: int) -> RECT:
     if hm and GetMonitorInfoW(hm, ctypes.byref(mi)):
         return mi.rcWork
     return work_area()
+
+
+# ---------------------------------------------------------------- 任务栏
+def taskbar_hwnd() -> HWND | None:
+    hwnd = FindWindowW("Shell_TrayWnd", None)
+    return hwnd or None
+
+
+def window_rect(hwnd: HWND | None) -> RECT | None:
+    if not hwnd:
+        return None
+    r = RECT()
+    return r if GetWindowRect(hwnd, ctypes.byref(r)) else None
+
+
+def taskbar_rect() -> RECT | None:
+    return window_rect(taskbar_hwnd())
+
+
+def tray_area_rect() -> RECT | None:
+    """托盘区（含输入法指示器与时钟）的屏幕矩形。"""
+    tray = taskbar_hwnd()
+    if not tray:
+        return None
+    return window_rect(FindWindowExW(tray, None, "TrayNotifyWnd", None))
+
+
+def set_child(hwnd: HWND, parent: HWND | None) -> None:
+    """把窗口挂到 parent 下（parent 为 None 时恢复为顶层窗口）。"""
+    style = int(GetWindowLongPtrW(hwnd, GWL_STYLE))
+    if parent:
+        SetParent(hwnd, parent)
+        style = (style & ~WS_POPUP) | WS_CHILD
+    else:
+        SetParent(hwnd, None)
+        style = (style & ~WS_CHILD) | WS_POPUP
+    SetWindowLongPtrW(hwnd, GWL_STYLE, style)
+    # 嵌入时置顶到同级最前，避免被任务栏的 XAML 内容盖住
+    SetWindowPos(hwnd, HWND_TOP if parent else None, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_FRAMECHANGED
+                 | (0 if parent else SWP_NOZORDER))
 
 
 def register_window_message(name: str) -> int:

@@ -13,6 +13,13 @@ from ..theme import Fonts
 
 class LayerWindow:
     CLASS = "TrayBatteryLayerWindow"
+    EX_STYLE = k.WS_EX_LAYERED | k.WS_EX_TOOLWINDOW | k.WS_EX_TOPMOST
+    # 展开动画：以锚点为原点缩放 + 淡入（0 → 1）
+    ANIM = True
+    ANIM_MS = 150
+    ANIM_FROM = 0.94
+    anchor = (0.5, 0.5)
+    topmost = True
 
     def __init__(self, app) -> None:
         self.app = app
@@ -21,10 +28,7 @@ class LayerWindow:
         self.lh = 10.0
         self.w = 10
         self.h = 10
-        self.hwnd = k.create_window(
-            self.CLASS, 10, 10,
-            k.WS_EX_LAYERED | k.WS_EX_TOOLWINDOW | k.WS_EX_TOPMOST,
-        )
+        self.hwnd = k.create_window(self.CLASS, 10, 10, self.EX_STYLE)
         k.bind_window(self.hwnd, self)
         self.canvas = k.LayeredCanvas()
         self.visible = False
@@ -39,6 +43,10 @@ class LayerWindow:
         self._drag_moved = False
         self._tracking_leave = False
         self._anim_timer = 0
+        self._frame: Image.Image | None = None
+        self._anim_i = 0
+        self._anim_frames = 1
+        self._animating = False
         self._measure = ImageDraw.Draw(Image.new("RGBA", (4, 4)))
 
     # ------------------------------------------------------------------ 尺寸
@@ -73,12 +81,16 @@ class LayerWindow:
         image = self.render()
         if image.size != (self.w, self.h):
             self.w, self.h = image.size
-        self.canvas.upload(image)
-        self.canvas.present(self.hwnd, self.pos[0], self.pos[1], alpha)
+        self._present(image, alpha)
         self._dirty = False
 
+    def _present(self, image, alpha: int) -> None:
+        """把位图送进分层窗口。子窗口会覆盖此方法以避开坐标系差异。"""
+        self.canvas.upload(image)
+        self.canvas.present(self.hwnd, self.pos[0], self.pos[1], alpha)
+
     def invalidate(self) -> None:
-        if self.visible:
+        if self.visible and not self._animating:
             self.paint(self.alpha)
 
     # ------------------------------------------------------------------ 显隐
@@ -92,26 +104,60 @@ class LayerWindow:
         if x is not None and y is not None:
             self.pos = (int(x), int(y))
         self._dirty = True
-        self.visible = True
-        flags = k.SWP_NOACTIVATE if not activate else 0
-        k.SetWindowPos(self.hwnd, k.HWND_TOPMOST, self.pos[0], self.pos[1], self.w, self.h,
-                       k.SWP_SHOWWINDOW | flags)
-        k.ShowWindow(self.hwnd, k.SW_SHOWNOACTIVATE if not activate else k.SW_SHOW)
-        if activate:
-            k.SetForegroundWindow(self.hwnd)
-        if animate:
+        # 关键：先在隐藏状态下把内容传进分层窗口。
+        # 否则复用的窗口会先把上一次的位图亮出来，再被抹掉，形成闪烁。
+        image = self.render()
+        self._frame = image
+        if image.size != (self.w, self.h):
+            self.w, self.h = image.size
+        if animate and self.ANIM:
+            self._animating = True
             self.alpha = 0
-            self.paint(0)
-            k.SetTimer(self.hwnd, 1, 15, None)
+            self._anim_i = 0
+            self._anim_frames = max(4, int(round(self.ANIM_MS / 16)))
+            self._anim_frame(0.0)
+            self._reveal(activate)
+            k.SetTimer(self.hwnd, 1, 16, None)
         else:
             self.alpha = 255
-            self.paint(255)
+            self._present(image, 255)
+            self._dirty = False
+            self._reveal(activate)
+
+    def _reveal(self, activate: bool) -> None:
+        self.visible = True
+        k.ShowWindow(self.hwnd, k.SW_SHOW if activate else k.SW_SHOWNOACTIVATE)
+        if not self.topmost:
+            return
+        # 只提层级与显隐，不碰几何：尺寸由 UpdateLayeredWindow 控制，
+        # 否则动画的首帧会被撑回完整大小，出现一次错位。
+        k.SetWindowPos(self.hwnd, k.HWND_TOPMOST, 0, 0, 0, 0,
+                       k.SWP_NOMOVE | k.SWP_NOSIZE | k.SWP_NOACTIVATE | k.SWP_SHOWWINDOW)
+        if activate:
+            k.SetForegroundWindow(self.hwnd)
+
+    def _anim_frame(self, t: float) -> None:
+        """按进度 t(0→1) 绘制缩放帧：锚点固定，图片从 ANIM_FROM 放大到 1.0。"""
+        img = self._frame
+        if img is None:
+            return
+        s = self.ANIM_FROM + (1.0 - self.ANIM_FROM) * t
+        w_ = max(1, int(round(img.width * s)))
+        h_ = max(1, int(round(img.height * s)))
+        frame = img if (w_, h_) == img.size else img.resize((w_, h_), Image.BILINEAR)
+        ax, ay = self.anchor
+        x = self.pos[0] + int(round((img.width - w_) * ax))
+        y = self.pos[1] + int(round((img.height - h_) * ay))
+        self.canvas.upload(frame)
+        self.canvas.present(self.hwnd, x, y, int(round(255 * t)))
 
     def hide(self) -> None:
         if not self.visible:
             return
         k.KillTimer(self.hwnd, 1)
         k.KillTimer(self.hwnd, 2)
+        self._animating = False
+        self._frame = None
         self.visible = False
         self.alpha = 255
         k.ShowWindow(self.hwnd, k.SW_HIDE)
@@ -249,11 +295,18 @@ class LayerWindow:
         pass
 
     def on_timer(self, timer_id: int) -> None:
-        if timer_id == 1:
-            self.alpha = min(255, self.alpha + 42)
-            self.paint(self.alpha)
-            if self.alpha >= 255:
-                k.KillTimer(self.hwnd, 1)
+        if timer_id != 1 or not self._animating:
+            return
+        self._anim_i += 1
+        t = min(1.0, self._anim_i / self._anim_frames)
+        eased = 1.0 - (1.0 - t) ** 3          # ease-out，收尾更稳
+        self.alpha = int(round(255 * eased))
+        self._anim_frame(eased)
+        if t >= 1.0:
+            k.KillTimer(self.hwnd, 1)
+            self._animating = False
+            self.alpha = 255
+            self.paint(255)                    # 收尾切回原图，文字恢复清晰
 
     def on_deactivate(self) -> None:
         pass

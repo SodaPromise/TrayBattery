@@ -1,4 +1,4 @@
-"""功能冒烟测试：用演示数据启动完整应用，逐项操作托盘、面板、悬浮条与设置。
+"""功能冒烟测试：用演示数据启动完整应用，逐项操作托盘、面板、电量条与设置。
 
 用法：python tools/smoke.py
 只操作临时配置目录，不读写注册表，不影响正在运行的实例。
@@ -101,21 +101,25 @@ def main() -> int:
         check(fly.visible, "托盘开合逻辑正常")
         fly.hide()
 
-        # ---------------------------------------------------------- 悬浮条
-        check(app.bar_window is not None and app.bar_window.visible, "悬浮条随启动显示")
+        # ---------------------------------------------------------- 任务栏电量条
+        check(app.bar_window is not None and app.bar_window.visible, "电量条随启动显示")
         bar = app.bar_window
         old_w = bar.w
-        check(old_w > 0, "悬浮条宽度有效")
+        check(old_w > 0, "电量条宽度有效")
+        tray_hwnd = k.taskbar_hwnd()
+        check(bool(tray_hwnd), "找到任务栏窗口 Shell_TrayWnd")
+        check(bar.embedded and k.GetParent(bar.hwnd) == tray_hwnd, "电量条已嵌入任务栏")
+        taskbar = k.taskbar_rect()
+        check(taskbar.top <= bar.pos[1] and bar.pos[1] + bar.h <= taskbar.bottom,
+              "电量条垂直居中于任务栏内")
+        tn = k.tray_area_rect()
+        if tn:
+            check(bar.pos[0] + bar.w <= tn.left + 2, "电量条位于托盘区左侧")
         bar.on_click("bar")
         pump(220)
-        check(fly.visible, "点击悬浮条打开面板")
-        check(fly.pos[1] + fly.h <= bar.pos[1] + 2 or fly.pos[1] >= bar.pos[1] + bar.h,
-              "面板未压住悬浮条")
+        check(fly.visible, "点击电量条打开面板")
+        check(fly.pos[1] + fly.h <= bar.pos[1] + 2, "面板在任务栏上方，未压住电量条")
         fly.hide()
-        bar.on_drag_end()
-        check(app.config["bar_pos"] is not None, "拖动悬浮条后记住位置")
-        app.config["bar_pos"] = None
-        app.config.save()
 
         # ---------------------------------------------------------- 设置窗口
         app.open_settings()
@@ -140,7 +144,7 @@ def main() -> int:
         settings.on_click("dev:demo:keyboard")
         pump(80)
         check(len(app.display_devices()) == 2, "勾选键盘后显示两台设备")
-        check(app.bar_window.w > old_w, "悬浮条随设备增加变宽")
+        check(app.bar_window.w > old_w, "电量条随设备增加变宽")
         check("MX Keys Mini" in app.tooltip_text(), "托盘提示加入键盘")
         app.toggle_device("demo:keyboard")
         pump(80)
@@ -155,9 +159,9 @@ def main() -> int:
         settings.on_click("theme:1")
         check(not app.theme.dark, "切换浅色主题")
         settings.on_click("bar")
-        check(not app.config["show_bar"] and not app.bar_window.visible, "关闭悬浮条")
+        check(not app.config["show_bar"] and not app.bar_window.visible, "关闭电量条")
         settings.on_click("bar")
-        check(app.config["show_bar"] and app.bar_window.visible, "重新打开悬浮条")
+        check(app.config["show_bar"] and app.bar_window.visible, "重新打开电量条")
         settings.on_click("alert")
         check(not app.config["alert"], "关闭低电量提醒")
         settings.on_click("alert")
@@ -184,7 +188,7 @@ def main() -> int:
 
         app.reset_settings()
         check(app.config["interval"] == 60, "恢复默认设置")
-        check(app.bar_window.visible, "恢复默认后悬浮条显示")
+        check(app.bar_window.visible, "恢复默认后电量条显示")
 
     finally:
         app.quit()

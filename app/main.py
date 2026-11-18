@@ -223,12 +223,13 @@ class App:
         win_h = int(round((fly.panel_height() + FLYOUT_PAD * 2) * s))
         work = self._work_area()
         gap = int(round(8 * s))
-        # 面板右边缘对齐悬浮条，再夹到工作区内
+        # 面板右边缘对齐电量条，再夹到工作区内
         x = bar.pos[0] + bar.w - win_w
         x = max(work.left + gap, min(x, work.right - win_w - gap))
-        y = bar.pos[1] - win_h - gap
+        # 电量条嵌在任务栏里时，pos[1] 会低于工作区底边，这里统一贴工作区底部
+        y = min(bar.pos[1], work.bottom) - win_h - gap
         if y < work.top + gap:
-            y = bar.pos[1] + bar.h + gap
+            y = min(bar.pos[1], work.bottom) + gap
         fly.show(x, y)
 
     def open_settings(self) -> None:
@@ -357,7 +358,7 @@ class App:
         k.AppendMenuW(menu, k.MF_STRING | (k.MF_CHECKED if self.config["paused"] else 0),
                       MENU_PAUSE, "暂停自动刷新")
         k.AppendMenuW(menu, k.MF_STRING | (k.MF_CHECKED if self.config["show_bar"] else 0),
-                      MENU_BAR, "显示任务栏悬浮条")
+                      MENU_BAR, "显示任务栏电量条")
         k.AppendMenuW(menu, k.MF_STRING, MENU_SETTINGS, "设置…")
         k.AppendMenuW(menu, k.MF_STRING | (k.MF_CHECKED if startup.is_enabled() else 0),
                       MENU_AUTOSTART, "开机自动启动")
@@ -407,7 +408,7 @@ class App:
         x = work.right - int(round((pad + panel_w) * s)) - int(round(10 * s))
         y = work.bottom - int(round((pad + panel_h) * s)) - int(round(8 * s))
         bar = self.bar_window
-        if bar is not None and bar.visible:
+        if bar is not None and bar.visible and not bar.embedded:
             win_w = int(round((pad * 2 + panel_w) * s))
             if x < bar.pos[0] + bar.w and x + win_w > bar.pos[0]:
                 above = bar.pos[1] - int(round((panel_h + pad * 2) * s)) - int(round(6 * s))
@@ -467,8 +468,17 @@ class App:
         if self.flyout_window.visible:
             self.flyout_window.hide()
         if self.bar_window and self.bar_window.visible:
-            self.bar_window.place_default()
-            self.bar_window.invalidate()
+            self.bar_window.refresh_position()
+
+    def rebuild_bar(self) -> None:
+        """任务栏重建后，旧的子窗口已被系统销毁，只能重建。"""
+        if self.bar_window is not None:
+            try:
+                self.bar_window.destroy()
+            except Exception:
+                pass
+            self.bar_window = None
+        self.update_bar()
 
     def on_dpi_changed(self, dpi: int) -> None:
         new_scale = k.scale_for_dpi(dpi)

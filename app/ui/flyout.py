@@ -21,6 +21,8 @@ MAX_ROWS = 5
 
 class FlyoutWindow(LayerWindow):
     CLASS = "TrayBatteryFlyout"
+    anchor = (1.0, 1.0)      # 从右下角（托盘方向）长出来
+    ANIM_MS = 160
 
     def __init__(self, app) -> None:
         super().__init__(app)
@@ -221,7 +223,7 @@ class FlyoutWindow(LayerWindow):
         self._btn = pressed
         if inside:
             return
-        # 悬浮条、设置窗口上的点击不应关闭面板
+        # 电量条、设置窗口上的点击不应关闭面板
         if self._in_window(getattr(self.app, "bar_window", None), mx, my):
             return
         if self._in_window(getattr(self.app, "settings_window", None), mx, my):

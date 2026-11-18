@@ -1,4 +1,4 @@
-"""设置窗口：选择显示设备、刷新间隔、悬浮条与常规选项。"""
+"""设置窗口：选择显示设备、刷新间隔、任务栏电量条与常规选项。"""
 from __future__ import annotations
 
 from PIL import Image, ImageDraw
@@ -55,7 +55,7 @@ class SettingsWindow(LayerWindow):
         return [
             ("seg", "自动刷新间隔", INTERVALS_OPTIONS, interval_idx, 208, "interval"),
             ("seg", "托盘图标", [o for _, o in TRAY_MODES], tray_idx, 132, "traymode"),
-            ("toggle", "任务栏悬浮条", "在任务栏上方常驻显示已选设备",
+            ("toggle", "任务栏电量条", "嵌在任务栏托盘区 / 输入法旁显示已选设备",
              bool(cfg["show_bar"]), "bar"),
             ("toggle", "低电量提醒", f"电量低于 {cfg['alert_threshold']}% 时提醒",
              bool(cfg["alert"]), "alert"),
@@ -196,7 +196,7 @@ class SettingsWindow(LayerWindow):
 
         # ------- 显示设备
         c.text((PAD, y + 11), "显示设备", f.get(12.5, "semibold"), theme.c("text"), "lm")
-        c.text((W - PAD, y + 11), "勾选后显示在托盘与悬浮条", f.get(9.8), theme.c("faint"), "rm")
+        c.text((W - PAD, y + 11), "勾选后显示在托盘与任务栏电量条", f.get(9.8), theme.c("faint"), "rm")
         y += 24
         devices = self.devices()
         if not devices:

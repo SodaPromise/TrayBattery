@@ -122,6 +122,7 @@ class TrayHost:
         if WM_TASKBARCREATED and msg == WM_TASKBARCREATED:
             self._added = False
             self.update_icon()
+            self.app.rebuild_bar()      # 子窗口会随旧任务栏一起销毁，需要重建
             return 0
         if msg == WM_REFRESHING:
             if self.app.flyout_window.visible:
