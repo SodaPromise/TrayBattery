@@ -143,6 +143,118 @@ class ProviderTests(unittest.TestCase):
         self.assertEqual(self.p._bt_mac(iid), "001122AABBCC")
         self.assertIsNone(self.p._bt_mac(r"USB\VID_046D&PID_C52B\5&1A2B3C4D&0&2"))
 
+    def test_active_bluetooth_keys(self):
+        ifaces = [
+            SimpleNamespace(container_id="CID-GAMEPAD",
+                            instance_id=r"BTHLE\DEV_44226C267099\7&2B2E0F6E&0&44226C267099",
+                            product="Xbox Wireless Controller"),
+            SimpleNamespace(container_id=None, instance_id=r"HID\VID_12D1&PID_10DB",
+                            product="HUAWEI Mouse"),
+            # 很多内置 HID 设备没有真实容器 ID，不能拿它当在线证据
+            SimpleNamespace(container_id="00000000-0000-0000-ffff-ffffffffffff",
+                            instance_id="", product="HIDI2C Device"),
+        ]
+        self.assertEqual(self.p.active_bluetooth_keys(ifaces), {
+            "cid:cid-gamepad", "mac:44226C267099",
+            "name:xbox wireless controller", "name:huawei mouse",
+            "name:hidi2c device",
+        })
+
+    def test_bluetooth_is_connected_requires_evidence(self):
+        mac = "44226C267099"
+        name = "Xbox Wireless Controller"
+        # 经典蓝牙：API 明确报告已连接，即使没有活跃接口也要认；
+        # 明确报告未连接、又没有活跃接口 -> 离线
+        self.assertTrue(self.p.bluetooth_is_connected(mac, "cid", name, {mac: True}, set()))
+        self.assertFalse(self.p.bluetooth_is_connected(mac, "cid", name, {mac: False},
+                                                       {"cid:unrelated"}))
+        # 走 LE 链路的键鼠：classic API 报未连接，但活跃接口证明它其实连着
+        self.assertTrue(self.p.bluetooth_is_connected(mac, "cid", name, {mac: False},
+                                                      {"cid:cid"}))
+        # BLE 设备压根不在 BluetoothFindFirstDevice 的结果里：
+        # 查不到 + 没有活跃接口 => 必须判离线，不能默认在线
+        missing = {"CCB0A8ACA68A": False}
+        self.assertFalse(self.p.bluetooth_is_connected(mac, "CID-GP", name, missing, set()))
+        # 真正连上时，容器 ID / MAC / 名称任一命中都能认出来
+        for evidence in ({"cid:cid-gp"}, {"mac:44226C267099"},
+                         {"name:xbox wireless controller"}):
+            self.assertTrue(self.p.bluetooth_is_connected(mac, "CID-GP", name,
+                                                          missing, evidence), evidence)
+        # 蓝牙 API 不可用：没有可靠依据，退回乐观判断
+        self.assertTrue(self.p.bluetooth_is_connected(mac, "CID-GP", name, None, set()))
+
+    def _bt_gamepad_node(self):
+        from app import devapi
+        return devapi.PnpNode(
+            instance_id=r"BTHLE\DEV_44226C267099\7&2B2E0F6E&0&44226C267099",
+            name="Xbox Wireless Controller",
+            class_name="Bluetooth",
+            container_id="7c85a645-489e-5ef0-a053-91a7287d5632",
+            enumerator="BTHLE",
+            battery=76,
+        )
+
+    def _patched_discover(self, ifaces, connection_map):
+        from unittest import mock
+        from app import devapi
+        patches = (
+            mock.patch.object(devapi, "scan_hid_interfaces", return_value=ifaces),
+            mock.patch.object(devapi, "scan_pnp_nodes", return_value=[self._bt_gamepad_node()]),
+            mock.patch.object(devapi, "read_hid_battery", return_value=None),
+            mock.patch.object(self.p, "bluetooth_connection_map", return_value=connection_map),
+            mock.patch.object(self.p, "scan_logitech", return_value=([], set())),
+            mock.patch.object(self.p, "scan_huawei", return_value={}),
+            mock.patch.object(self.p, "scan_compx", return_value={}),
+            mock.patch.object(self.p, "scan_razer", return_value={}),
+        )
+        for p in patches:
+            p.start()
+        try:
+            return self.p.discover()
+        finally:
+            for p in reversed(patches):
+                p.stop()
+
+    def test_discover_disconnected_ble_gamepad_is_offline(self):
+        """回归：已配对但没连接的手柄，不能带断开前的 76% 显示成已连接。"""
+        found = self._patched_discover([], {"CCB0A8ACA68A": False})
+        dev = next(d for d in found if d.key == "bt:44226C267099")
+        self.assertEqual(dev.kind, GAMEPAD)
+        self.assertEqual(dev.status, OFFLINE)
+        self.assertIsNone(dev.level)
+        self.assertEqual(dev.last_level, 76)
+        self.assertIn("未连接", dev.status_text())
+
+    def test_discover_connected_ble_gamepad_is_online(self):
+        """连上时仍要正常显示电量：API 报告已连接，或有活跃 HID 接口。"""
+        from app import devapi
+        for ifaces, cmap in (
+            ([], {"44226C267099": True}),
+            ([devapi.HidInterface(
+                path="", vendor_id=0x045E, product_id=0x0B13, version=0,
+                product="Xbox Wireless Controller", manufacturer="Microsoft",
+                usage_page=0x01, usage=0x05, in_len=16, out_len=0, feature_len=0,
+                instance_id=r"HID\VID_045E&PID_0B13", class_name="HIDClass",
+                container_id="7c85a645-489e-5ef0-a053-91a7287d5632",
+            )], {"CCB0A8ACA68A": False}),
+        ):
+            with self.subTest(evidence="api" if not ifaces else "hid"):
+                found = self._patched_discover(ifaces, cmap)
+                dev = next(d for d in found if d.key == "bt:44226C267099")
+                self.assertEqual(dev.status, ONLINE)
+                self.assertEqual(dev.level, 76)
+                self.assertIn("已连接", dev.status_text())
+
+    def test_scan_vendor_cache_expires(self):
+        """私有通道长时间无应答后，不能再无限期沿用旧电量。"""
+        cache = self.p._Cache()
+        cache.put("c1", 77, False)
+        old = cache.last("c1")
+        cache._items["c1"] = (old[0] - 31 * 60, old[1], old[2])
+        out = self.p._scan_vendor([SimpleNamespace(container_id="c1")],
+                                  lambda i: True, lambda i: None, cache, 0)
+        self.assertEqual(out, {})
+
     def test_group_container_classes(self):
         nodes = [
             SimpleNamespace(container_id="c1", class_name="Mouse"),

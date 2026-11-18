@@ -183,7 +183,63 @@ def bluetooth_connection_map() -> dict[str, bool] | None:
     return result
 
 
+def active_bluetooth_keys(ifaces: list[devapi.HidInterface]) -> set[str]:
+    """当前「确实在通信」的蓝牙设备标识集合。
+
+    已配对但没连上的蓝牙设备，Windows 会保留它的 PnP 节点和
+    ``DEVPKEY_Bluetooth_Battery`` 属性（里面是断开前的旧电量），节点状态
+    甚至仍是 DN_STARTED。只有真正连上时，系统才会为它建立 HID 设备接口，
+    因此 DIGCF_PRESENT 枚举到的接口可以当作在线旁证。
+    """
+    keys: set[str] = set()
+    for itf in ifaces:
+        cid = (itf.container_id or "").lower()
+        if cid and not cid.startswith("00000000-0000-0000-ffff"):
+            keys.add("cid:" + cid)
+        iid = (itf.instance_id or "").upper()
+        if iid.startswith(("BTHENUM", "BTHLE")):
+            mac = _bt_mac(iid)
+            if mac:
+                keys.add("mac:" + mac)
+        if itf.product:
+            keys.add("name:" + itf.product.strip().lower())
+    return keys
+
+
+def bluetooth_is_connected(mac: str | None, container_id: str | None, name: str,
+                           connected_map: dict[str, bool] | None,
+                           active_keys: set[str]) -> bool:
+    """判断蓝牙设备当前是否连着；没有在线证据就一律按未连接处理。
+
+    ``BluetoothFindFirstDevice`` 只报告经典蓝牙设备的 ``fConnected``，
+    BLE 设备（BTHLE / BTHLEDEVICE，例如 Xbox 手柄）压根不在枚举结果里。
+    旧逻辑把「查不到」当成「已连接」，于是断开的手柄会带着缓存电量
+    一直显示在线。这里改用「权威状态 + 活跃接口旁证」双重判断。
+    """
+    if connected_map is None:
+        # 蓝牙 API 不可用时没有可靠依据，退回乐观判断，避免整机误判离线。
+        return True
+    candidates: set[str] = set()
+    if mac:
+        candidates.add("mac:" + mac)
+    if container_id:
+        candidates.add("cid:" + container_id.lower())
+    if name:
+        candidates.add("name:" + clean_bt_name(name).strip().lower())
+    if candidates & active_keys:
+        # 活跃设备接口是最直接的证据：部分 BLE 键鼠走 LE 链路，
+        # 在经典蓝牙 API 里却一直是 fConnected=False，不能据此判离线。
+        return True
+    # 没有活跃接口时，只认 API 明确报告「已连接」的设备。
+    return bool(mac and connected_map.get(mac, False))
+
+
 # ------------------------------------------------------------------ 私有协议缓存
+# 一次成功读数之后，最多还允许沿用 30 分钟。再久就说明设备已经离线，
+# 不能继续把它最后一次的电量当成实时值展示。
+_VENDOR_STALE_TTL = 30 * 60
+
+
 class _Cache:
     """容器 ID → (时间戳, 电量, 充电中)：带 TTL，失败时沿用上次读数。"""
 
@@ -233,8 +289,10 @@ def _scan_vendor(ifaces, match, reader, cache: _Cache, ttl: float):
         if got:
             cache.put(cid, *got)
             out[cid] = got
-        elif cache.last(cid):
-            out[cid] = cache.last(cid)[1:]
+        else:
+            last = cache.last(cid)
+            if last and time.time() - last[0] < _VENDOR_STALE_TTL:
+                out[cid] = last[1:]
     return out
 
 
@@ -626,7 +684,9 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
     nodes = devapi.scan_pnp_nodes()
     classes = group_container_classes(nodes)
     connected_map = bluetooth_connection_map()
+    active_keys = active_bluetooth_keys(ifaces)
     devices: dict[str, Device] = {}
+    offline_bt_keys: set[str] = set()
 
     # 1) 带电量属性的蓝牙/系统设备
     bt_containers: set[str] = set()
@@ -642,10 +702,9 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
         kind = infer_kind(name, classes.get(key))
         level = max(n.battery or 0 for n in group)
         mac = next((m for m in (_bt_mac(n.instance_id) for n in group) if m), None)
-        is_bt = any(n.enumerator in ("BTHENUM", "BTHLE") for n in group)
-        connected = True
-        if is_bt and connected_map and mac and mac in connected_map:
-            connected = bool(connected_map[mac])
+        is_bt = any(n.enumerator.upper().startswith("BTH") for n in group)
+        connected = (not is_bt) or bluetooth_is_connected(
+            mac, key, name, connected_map, active_keys)
         device = Device(
             key=f"bt:{mac or key}",
             name=name,
@@ -654,7 +713,7 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
             status=ONLINE if connected else OFFLINE,
             level=level if connected else None,
             last_level=level,
-            detail="" if connected else "设备未连接，显示上次电量",
+            detail="" if connected else "设备未连接",
         )
         devices[device.key] = device
 
@@ -689,7 +748,13 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
         kind = infer_kind(name, cls)
         if kind == OTHER:
             continue
-        is_bt = any(i.instance_id.upper().startswith(("BTHENUM", "BTHLE")) for i in group)
+        is_bt = any(i.instance_id.upper().startswith("BTH") for i in group)
+        if is_bt:
+            bt_mac = _bt_mac(group[0].instance_id)
+            if not bluetooth_is_connected(bt_mac, cid, name, connected_map, active_keys):
+                offline_bt_keys.add(f"hid:{cid}")
+                if bt_mac:
+                    offline_bt_keys.add(f"bt:{bt_mac}")
         known = vendor_battery.get(cid)
         if known is not None:
             level, charging = known
@@ -720,7 +785,7 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
                 kind=kind,
                 transport="2.4G",
                 status=OFFLINE,
-                detail="设备未应答，显示上次电量",
+                detail="设备未应答",
             )
             continue
 
@@ -750,6 +815,17 @@ def discover(demo: bool = False, force: bool = False) -> list[Device]:
                 charging=charging,
                 detail=detail,
             )
+
+    # 没有在线证据的蓝牙设备，即使读到了电量也只是断开前的缓存值，
+    # 必须清掉实时电量，避免「已连接 + 百分比」的假象。
+    for key, device in devices.items():
+        if key not in offline_bt_keys or device.status != ONLINE:
+            continue
+        device.status = OFFLINE
+        device.last_level = device.level if device.level is not None else device.last_level
+        device.level = None
+        device.charging = False
+        device.detail = "设备未连接"
 
     return sorted(devices.values(), key=lambda d: d.sort_key())
 
